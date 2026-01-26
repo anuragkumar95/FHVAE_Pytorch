@@ -6,17 +6,17 @@ from torch.autograd import Variable
 from typing import List
 import numpy as np
 
-class VariableLSTMLayer(nn.Module):
-    def __init__(self, in_dim, out_dim, num_layers=1):
-        super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.lstm = nn.LSTM(in_dim, out_dim, num_layers=num_layers, bidirectional=False, batch_first=True)
-        self.num_layers=num_layers
+# class VariableLSTMLayer(nn.Module):
+#     def __init__(self, in_dim, out_dim, num_layers=1):
+#         super().__init__()
+#         self.in_dim = in_dim
+#         self.out_dim = out_dim
+#         self.lstm = nn.LSTM(in_dim, out_dim, num_layers=num_layers, bidirectional=False, batch_first=True)
+#         self.num_layers=num_layers
 
-    def forward(self, x, ):
-        output, (h, _) = self.lstm(x)
-        return output, h
+#     def forward(self, x, ):
+#         output, (h, _) = self.lstm(x)
+#         return output, h
 
 
 class LatentSegEncoder(nn.Module):
@@ -40,7 +40,7 @@ class LatentSegEncoder(nn.Module):
         else:
             self.hus = hus
         self.num_layers = n_LSTM_layers
-        self.lstm = VariableLSTMLayer(input_size, self.hus, num_layers=n_LSTM_layers)
+        self.lstm = nn.LSTM(input_size, hus, num_layers=n_LSTM_layers, bidirectional=False, batch_first=True)
         self.z1_gauss_layer = GaussianLayer(hus, output_size)
 
     def forward(self, x: torch.Tensor, lat_seq: torch.Tensor):
@@ -48,8 +48,8 @@ class LatentSegEncoder(nn.Module):
         lat_seq = lat_seq.unsqueeze(1).repeat(1, T, 1)
         x_z2 = torch.cat([x, lat_seq], dim=-1)
 
-        _, hid = self.lstm(x_z2)
-        z1_mu, z1_logvar, z1_sample = self.z1_gauss_layer(hid[-1, :, :])
+        _, (h, _) = self.lstm(x_z2)
+        z1_mu, z1_logvar, z1_sample = self.z1_gauss_layer(h[-1, :, :])
         return z1_mu, z1_logvar, z1_sample
 
 
@@ -69,12 +69,12 @@ class LatentSeqEncoder(nn.Module):
         super().__init__()
         if hus is None:
             hus = 1024
-        self.lstm = VariableLSTMLayer(input_size, hus, num_layers=n_LSTM_layers)
+        self.lstm = nn.LSTM(input_size, hus, num_layers=n_LSTM_layers, bidirectional=False, batch_first=True)
         self.z2_gauss_layer = GaussianLayer(hus, output_size)
 
     def forward(self, x):
-        _, hid = self.lstm(x)
-        z2_mu, z2_logvar, z2_sample = self.z2_gauss_layer(hid[-1, :, :])
+        _, (h, _) = self.lstm(x)
+        z2_mu, z2_logvar, z2_sample = self.z2_gauss_layer(h[-1, :, :])
         return z2_mu, z2_logvar, z2_sample
 
 

@@ -7,7 +7,7 @@
         "seg_len": 32,
         "seg_shift": 24,
         "min_len": 32,
-        "mvn_path": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/misc/mvn.json",
+        "mvn_path": "/users/PAS2301/kumar1109/FHVAE_Pytorch/misc/mvn.json",
         "rand_seg": false
     },
     "training_args":{
