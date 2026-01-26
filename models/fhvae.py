@@ -154,10 +154,14 @@ class FHVAE(nn.Module):
             pz2[0] = mu2
 
         # Get z1 latents
+        if mode != 'train':
+            z2_sample = z2_mu
         z1_mu, z1_logvar, z1_sample = self.z1_encoder(x, z2_sample)
         qz1_x = [z1_mu, z1_logvar]
 
         # Decode for reconstruction
+        if mode != 'train':
+            z1_sample = z1_mu
         x_mu, x_logvar, x_sample = self.decoder(z1_sample, z2_sample, seq_len=x.shape[1])
         px_z = [x_mu, x_logvar]
 
