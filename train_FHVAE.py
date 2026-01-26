@@ -55,7 +55,7 @@ def loss_function(lower_bound, log_qy, alpha=10.0):
         Segment variational lower bound plus the (weighted) discriminative objective.
 
     """
-    return -1 * torch.mean(lower_bound + alpha * log_qy)
+    return -1 * torch.mean(lower_bound) + alpha * log_qy
 
 
 def check_terminate(epoch, best_epoch, patience, epochs):
