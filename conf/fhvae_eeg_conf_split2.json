@@ -1,0 +1,36 @@
+{
+    "seed": 777,
+    "task": "eeg",
+    "run_name": "fhvae_e500_b1024_a10.0_z32_h256_LSTM2_split2",
+    "data_args":{
+        "csv": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/Datasets/sparrkulee_split2.csv",
+        "seg_len": 32,
+        "seg_shift": 24,
+        "min_len": 32,
+        "mvn_path": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/misc/mvn_eeg_split2.json",
+        "rand_seg": false
+    },
+    "training_args":{
+        "epochs":1000,
+        "batch_size":1024,
+        "accum_grad":1,
+        "patience":50,
+        "steps_per_epoch":2500, 
+        "alpha_dis": 10.0
+    },
+    "optimizer_args":{
+        "lr":0.001,
+        "betas":[0.95, 0.999],
+        "weight_decay":0.0001
+    },
+    "model_args":{
+        "input_size":64,
+        "z1_dim":32,
+        "z2_dim":32,
+        "z1_hus":256,
+        "z2_hus":256,
+        "x_hus":256,
+        "n_LSTM_layers":1
+    }
+    
+}

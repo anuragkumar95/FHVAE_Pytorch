@@ -1,0 +1,10 @@
+__pycache__/
+venv/
+wandb/
+slurm*.out
+slurm.sh
+slurm-spk.sh
+experiments/
+
+# Ignore tags file
+tags
