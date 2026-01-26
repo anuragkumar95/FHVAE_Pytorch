@@ -209,17 +209,18 @@ class NumpyEEGDataset(BaseDataset):
                 feat = np.load(f)[:, seg.start : seg.end]
             feat = self.apply_mvn(feat)
             nsegs = self.seq_nsegs[idx]
+            feat = feat.T
         else:
             seq = self.seqs[index]
             segs = [seg for seg in self.segs if seg.seq == seq]
-            with open(self.eeg_paths[index], "rb") as f:
-                f = np.load(f)
+            with open(self.eeg_paths[index], "rb") as fp:
+                f = np.load(fp)
+            f = self.apply_mvn(f)
             feat = []
             for seg in segs:
-                f_t = f[np.newaxis, :, seg.start : seg.end]
-                feat.append(f_t)
+                f_t = f[:, seg.start : seg.end].T
+                feat.append(f_t[np.newaxis, :, :])
             feat = np.concatenate(feat, axis=0)
-            print(f"feat:{feat.shape}")
             idx = np.asarray([-1 for i in range(feat.shape[0])])
             nsegs = np.asarray([feat.shape[0] for i in range(feat.shape[0])])
-        return idx, feat.T, nsegs
+        return idx, feat, nsegs
