@@ -111,8 +111,8 @@ class FHVAE(nn.Module):
             'z1': {'mu':z1_mu, 'logvar':z1_logvar, 'sample':z1_sample},
         }
 
-    def reconstruct_latents(self, z1_sample, z2_sample):
-        x_mu, x_logvar, x_sample = self.decoder(z1_sample, z2_sample)
+    def reconstruct_latents(self, z1_sample, z2_sample, seq_len):
+        x_mu, x_logvar, x_sample = self.decoder(z1_sample, z2_sample, seq_len)
         return {
             'mu': x_mu, 
             'logvar': x_logvar,
@@ -198,7 +198,7 @@ class FHVAE(nn.Module):
         latents = self.extract_latents(x)
         z1 = latents['z1']['mean']
         z2 = latents['z2']['mean']
-        return self.reconstruct_latents(z1, z2)
+        return self.reconstruct_latents(z1, z2, x.shape[1])
 
 
 class ExtendedFHVAE(FHVAE):
