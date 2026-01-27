@@ -92,32 +92,6 @@ class FHVAE(nn.Module):
             - q_logvar
             - (torch.pow(p_mu - q_mu, 2) + torch.exp(p_logvar)) / np.exp(q_logvar)
         )
-    
-    def extract_z2(self, x):
-        """Extract z2 latent features"""
-        return self.z2_encoder(x)
-    
-    def extract_z1(self, x):
-        """Extract z1 latent features"""
-        _, _, z2_sample = self.extract_z2(x)
-        return self.z1_encoder(x, z2_sample)
-    
-    def extract_latents(self, x):
-        """Extract z1, z2 latent features"""
-        z2_mu, z2_logvar, z2_sample = self.extract_z2(x)
-        z1_mu, z1_logvar, z1_sample = self.extract_z1(x)
-        return {
-            'z2': {'mu':z2_mu, 'logvar':z2_logvar, 'sample':z2_sample},
-            'z1': {'mu':z1_mu, 'logvar':z1_logvar, 'sample':z1_sample},
-        }
-
-    def reconstruct_latents(self, z1_sample, z2_sample, seq_len):
-        x_mu, x_logvar, x_sample = self.decoder(z1_sample, z2_sample, seq_len)
-        return {
-            'mu': x_mu, 
-            'logvar': x_logvar,
-            'sample': x_sample
-        } 
 
     def forward(
         self, x: torch.Tensor, mu_idx: torch.Tensor, num_seqs: int, num_segs: int, mode: str = 'train'
@@ -193,12 +167,38 @@ class FHVAE(nn.Module):
 
         return lower_bound, log_qy, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_sample
     
+    def extract_z2(self, x):
+        """Extract z2 latent features"""
+        return self.z2_encoder(x)
+    
+    def extract_z1(self, x):
+        """Extract z1 latent features"""
+        _, _, z2_sample = self.extract_z2(x)
+        return self.z1_encoder(x, z2_sample)
+    
+    def extract_latents(self, x):
+        """Extract z1, z2 latent features"""
+        z2_mu, z2_logvar, z2_sample = self.extract_z2(x)
+        z1_mu, z1_logvar, z1_sample = self.extract_z1(x)
+        return {
+            'z2': {'mu':z2_mu, 'logvar':z2_logvar, 'sample':z2_sample},
+            'z1': {'mu':z1_mu, 'logvar':z1_logvar, 'sample':z1_sample},
+        }
+
+    def reconstruct_from_latents(self, z1_sample, z2_sample, seq_len):
+        x_mu, x_logvar, x_sample = self.decoder(z1_sample, z2_sample, seq_len)
+        return {
+            'mu': x_mu, 
+            'logvar': x_logvar,
+            'sample': x_sample
+        } 
+    
     def generate(self, x):
         """Function that reconstructs the input. Do not use this for training."""
         latents = self.extract_latents(x)
         z1 = latents['z1']['mean']
         z2 = latents['z2']['mean']
-        return self.reconstruct_latents(z1, z2, x.shape[1])
+        return self.reconstruct_from_latents(z1, z2, x.shape[1])
 
 
 class ExtendedFHVAE(FHVAE):
