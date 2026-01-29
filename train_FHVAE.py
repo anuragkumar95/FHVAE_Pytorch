@@ -55,7 +55,7 @@ def loss_function(lower_bound, log_qy, alpha=10.0):
         Segment variational lower bound plus the (weighted) discriminative objective.
 
     """
-    return torch.mean(-lower_bound + alpha * log_qy)
+    return -torch.mean(lower_bound + alpha * log_qy)
 
 
 def check_terminate(epoch, best_epoch, patience, epochs):
@@ -182,14 +182,20 @@ class Trainer:
         }
         save_path = os.path.join(self.exp_dir, f"best_checkpoint_best_{kwargs.get('save_metric', 'model')}.pt")
         torch.save(save_dict, save_path)
+        with open(f"{self.exp_dir}/config.json", 'w') as f:
+            json.dump(self.config, f)
         print(f"Checkpoint saved at {save_path}")
 
     def load_checkpoint(self, checkpoint_path, map_location='cpu'):
+        ckpt_dir = "/".join(checkpoint_path.split('/')[:-1])
+
+        with open(f"{ckpt_dir}/config.json", 'r') as f:
+            self.config = json.load(f)
+
         checkpoint = torch.load(checkpoint_path, map_location=map_location)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.start_epoch = checkpoint.get('epoch', 0) + 1
-        print(f"Loaded checkpoint from {checkpoint_path}, starting at epoch {self.start_epoch}")
 
     def reduce_tensor(self, tensor, world_size):
         """Sums a tensor across all GPUs and divides by world_size to get the mean."""

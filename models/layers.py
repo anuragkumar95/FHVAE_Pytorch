@@ -153,10 +153,10 @@ class LSTMDecoder(nn.Module):
         
         for _ in range(seq_len):
             _, h_state = self.lstm(z1_z2, h_state)
-            x_t_mu, x_t_logvar, x_t_sample = self.dec_gauss_layer(h_state[0])
-            x_mu.append(x_t_mu[-1, :, :].unsqueeze(1))
-            x_logvar.append(x_t_logvar[-1, :, :].unsqueeze(1))
-            x_rec.append(x_t_sample[-1, :, :].unsqueeze(1))
+            x_t_mu, x_t_logvar, x_t_sample = self.dec_gauss_layer(h_state[0][-1, :, :])
+            x_mu.append(x_t_mu.unsqueeze(1))
+            x_logvar.append(x_t_logvar.unsqueeze(1))
+            x_rec.append(x_t_sample.unsqueeze(1))
         x_mu = torch.cat(x_mu, dim=1)
         x_logvar = torch.cat(x_logvar, dim=1)
         x_rec = torch.cat(x_rec, dim=1)

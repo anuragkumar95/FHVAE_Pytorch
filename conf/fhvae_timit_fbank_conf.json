@@ -1,20 +1,20 @@
 {
     "seed": 777,
     "task":"timit",
-    "run_name": "fhvae_timit_e500_b256_a10.0_z32_h256_LSTM1",
-    "dataset_dir": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/timit_np_spec",
+    "run_name": "fhvae_timit_fbank_e1000_b256_a10.0_z32_h256_LSTM2",
+    "dataset_dir": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/timit_np_fbank",
     "data_args":{
         "seg_len": 32,
         "seg_shift": 24,
         "min_len": 32,
-        "mvn_path": "/users/PAS2301/kumar1109/FHVAE_Pytorch/misc/mvn.json",
+        "mvn_path": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/misc/mvn_fbank.json",
         "rand_seg": false
     },
     "training_args":{
-        "epochs":500,
-        "batch_size":32,
-        "accum_grad":8,
-        "patience":50,
+        "epochs":1000,
+        "batch_size":256,
+        "accum_grad":1,
+        "patience":100,
         "steps_per_epoch":2500, 
         "alpha_dis": 10.0
     },
@@ -24,13 +24,13 @@
         "weight_decay":0.0001
     },
     "model_args":{
-        "input_size":201,
+        "input_size":80,
         "z1_dim":32,
         "z2_dim":32,
         "z1_hus":256,
         "z2_hus":256,
         "x_hus":256,
-        "n_LSTM_layers":1
+        "n_LSTM_layers":2
     }
     
 }

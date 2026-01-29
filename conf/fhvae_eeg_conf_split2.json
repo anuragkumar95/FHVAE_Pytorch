@@ -1,7 +1,7 @@
 {
     "seed": 777,
     "task": "eeg",
-    "run_name": "fhvae_e500_b1024_a10.0_z32_h256_LSTM2_split2",
+    "run_name": "fhvae_e500_b5000_a10.0_z32_h256_LSTM2_split2",
     "data_args":{
         "csv": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/Datasets/sparrkulee_split2.csv",
         "seg_len": 32,
@@ -12,7 +12,7 @@
     },
     "training_args":{
         "epochs":1000,
-        "batch_size":1024,
+        "batch_size":5000,
         "accum_grad":1,
         "patience":50,
         "steps_per_epoch":2500, 
@@ -30,7 +30,7 @@
         "z1_hus":256,
         "z2_hus":256,
         "x_hus":256,
-        "n_LSTM_layers":1
+        "n_LSTM_layers":2
     }
     
 }
