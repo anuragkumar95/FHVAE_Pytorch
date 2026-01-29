@@ -188,7 +188,7 @@ class NumpyEEGDataset(BaseDataset):
         )
 
         self._mvn_prep(mvn_path)
-        self.num_seqs = len(self.seqs)
+        self.n_seqs = len(self.seqs)
         self.split = split
         self.eeg_paths = list(self.csv['eeg_path'])
         assert len(self.eeg_paths) == len(self.seqs)

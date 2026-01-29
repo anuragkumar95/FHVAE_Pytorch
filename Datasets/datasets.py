@@ -301,6 +301,7 @@ class NumpyDataset(BaseDataset):
         self._mvn_prep(mvn_path)
         self.split = split
         self.idx2seq = {v:k for k,v in self.seq2idx.items()}
+        self.n_seqs = len(self.seq2idx.keys())
 
     def __len__(self, ):
         if self.split == 'train':

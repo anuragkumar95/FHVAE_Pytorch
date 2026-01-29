@@ -145,7 +145,10 @@ class Trainer:
         )
 
         # Config model, optimizer
-        self.model = FHVAE(**config['model_args']).to(self.device).double()
+        self.model = FHVAE(
+            **config['model_args'],
+            n_seqs=self.train_ds.n_seqs,
+        ).to(self.device).double()
         if parallel and rank is not None:
             self.model = DDP(
                 self.model, device_ids=[rank], output_device=rank
@@ -182,6 +185,7 @@ class Trainer:
         }
         save_path = os.path.join(self.exp_dir, f"best_checkpoint_best_{kwargs.get('save_metric', 'model')}.pt")
         torch.save(save_dict, save_path)
+        self.config['model_params']['n_seqs'] = self.train_ds.n_seqs
         with open(f"{self.exp_dir}/config.json", 'w') as f:
             json.dump(self.config, f)
         print(f"Checkpoint saved at {save_path}")
