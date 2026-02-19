@@ -3,7 +3,7 @@ from collections import defaultdict
 import numpy as np
 from pathlib import Path
 import torch
-from models.simple_fhvae import SimpleFHVAE
+# from models.simple_fhvae import SimpleFHVAE
 from models.fhvae import FHVAE
 import shutil
 from typing import Any, Optional

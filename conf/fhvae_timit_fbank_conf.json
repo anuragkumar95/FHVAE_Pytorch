@@ -1,13 +1,13 @@
 {
     "seed": 777,
     "task":"timit",
-    "run_name": "fhvae_timit_fbank_e1000_b256_a10.0_z32_h256_LSTM2",
-    "dataset_dir": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/timit_np_fbank",
+    "run_name": "fhvae_timit_fbank_e1000_b256_a10.0_z32_h256_enc_Trans_L2_dec_LSTM2_beta_0.2",
+    "dataset_dir": "/fs/scratch/PAS2301/kumar1109/TIMIT/timit_np_fbank",  
     "data_args":{
         "seg_len": 32,
         "seg_shift": 24,
         "min_len": 32,
-        "mvn_path": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/misc/mvn_fbank.json",
+        "mvn_path": "/fs/scratch/PAS2301/kumar1109/TIMIT/mvn_fbank.json",
         "rand_seg": false
     },
     "training_args":{
@@ -30,7 +30,9 @@
         "z1_hus":256,
         "z2_hus":256,
         "x_hus":256,
-        "n_LSTM_layers":2
+        "n_LSTM_layers":2,
+        "n_layers":2,
+        "nhead":8
     }
     
 }

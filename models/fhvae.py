@@ -11,6 +11,8 @@ from models.layers import (
     LSTMDecoder,
 )
 
+from models.layers_transformer import TransformerSeqEncoder, TransformerSegEncoder, TransformerDecoder
+
 class FHVAE(nn.Module):
     def __init__(
         self,
@@ -21,7 +23,9 @@ class FHVAE(nn.Module):
         z1_dim=16,
         z2_dim=16,
         x_hus=128,
-        n_LSTM_layers=1, 
+        n_LSTM_layers=1,
+        n_layers=2,
+        nhead=8,
     ):
         super().__init__()
         self.model = "fhvae"
@@ -40,24 +44,55 @@ class FHVAE(nn.Module):
         #Lookup table
         self.mu2_table = nn.Embedding(num_embeddings=n_seqs, embedding_dim=z2_dim)       
 
-        self.z1_encoder = LatentSegEncoder(
-            input_size=input_size+self.z1_dim, 
-            output_size=self.z1_dim,
-            hus=self.z1_hus, 
-            n_LSTM_layers=n_LSTM_layers
-        )
-        self.z2_encoder = LatentSeqEncoder(
-            input_size=input_size, 
-            output_size=self.z2_dim,
-            hus=self.z2_hus, 
-            n_LSTM_layers=n_LSTM_layers
-        )
+        # using LSTM for both encoders and decoder as per original FHVAE paper
+        
+        # self.z2_encoder = LatentSeqEncoder(
+        #     input_size=input_size, 
+        #     output_size=self.z2_dim,
+        #     hus=self.z2_hus, 
+        #     n_LSTM_layers=n_LSTM_layers
+        # )
+        
+        # self.z1_encoder = LatentSegEncoder(
+        #     input_size=input_size+self.z2_dim, 
+        #     output_size=self.z1_dim,
+        #     hus=self.z1_hus, 
+        #     n_LSTM_layers=n_LSTM_layers
+        # )
+       
         self.decoder = LSTMDecoder(
             input_size=self.z1_dim+self.z2_dim, 
             output_size=input_size,
             hus=self.x_hus, 
             n_LSTM_layers=n_LSTM_layers
         )
+
+
+        # replacing the LSTM encoder with transformer-based ones
+        self.z2_encoder = TransformerSeqEncoder(
+            input_size=input_size, 
+            output_size=z2_dim,
+            hus=z2_hus, 
+            n_layers=n_layers,
+            nhead=nhead
+        )
+
+        self.z1_encoder = TransformerSegEncoder(
+            input_size=input_size + z2_dim,
+            output_size=z1_dim,
+            hus=z1_hus, 
+            n_layers=n_layers,
+            nhead=nhead
+        )
+        
+        # self.decoder = TransformerDecoder(
+        #     input_size=z1_dim + z2_dim, 
+        #     output_size=input_size,
+        #     hus=x_hus, 
+        #     n_layers=n_layers,
+        #     nhead=nhead
+        # )
+
         self.loss = nn.CrossEntropyLoss()
 
     def log_gauss(self, x, mu=0.0, logvar=0.0):
@@ -128,6 +163,9 @@ class FHVAE(nn.Module):
         z2_mu, z2_logvar, z2_sample = self.z2_encoder(x)
         qz2_x = [z2_mu, z2_logvar]
 
+        # define constant prior variance for z2
+        pz2_logvar = np.log(0.5 ** 2).astype(np.float32)
+
         if mode == 'train':
             #mu2_table, mu2 = self.mu2_lookup(mu_idx, self.z2_dim, num_seqs, device=x.device)
             mu2 = self.mu2_table(mu_idx)
@@ -135,12 +173,19 @@ class FHVAE(nn.Module):
             # mu2 lookup for unseen seq
             # NOTE: during val/test, we send one whole sequence divided into its segments as one batch
             # thus, z2_mu should be summed along the first dim 0.
-            mu2 = z2_mu.sum(0) / (x.shape[0] + (np.exp(pz2[1]) / np.exp(self.pmu2[1])))
-            mu2 = mu2.repeat(x.shape[0], 1)
-            pz2[0] = mu2
 
+            # mu2 = z2_mu.sum(0) / (x.shape[0] + (np.exp(pz2[1]) / np.exp(self.pmu2[1])))
+            # mu2 = mu2.repeat(x.shape[0], 1)
+            # pz2[0] = mu2
+
+            # updated version:
+            mu2 = z2_mu.sum(0) / (x.shape[0] + (np.exp(pz2_logvar) / np.exp(self.pmu2[1])))
+            mu2 = mu2.repeat(x.shape[0], 1)
+            
         # z2 prior
-        pz2 = [mu2, np.log(0.5 ** 2).astype(np.float32)]
+        # pz2 = [mu2, np.log(0.5 ** 2).astype(np.float32)]
+
+        pz2 = [mu2, pz2_logvar]
 
         # Get z1 latents
         if mode!= 'train':

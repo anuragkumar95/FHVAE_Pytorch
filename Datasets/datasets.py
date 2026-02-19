@@ -69,6 +69,7 @@ class BaseDataset(Dataset):
                                 extract floor(seq_len/seg_shift) segments per sequence
             rand_seg: If True, randomly extract segments
         """
+        self.feat_scp = feat_scp
         feats = scp2dict(feat_scp)
         lens = scp2dict(len_scp, int, feats.keys())
 
@@ -147,9 +148,14 @@ class BaseDataset(Dataset):
     def _make_seq_lists(self, seqlist):
         """Return lists of all sequences and the corresponding features and lengths."""
         keys, feats, lens = [], [], []
+        # base_dir = os.path.dirname(os.path.dirname(self.feat_scp))
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(self.feat_scp)))
+
         for seq in seqlist:
             keys.append(seq)
-            feats.append(self.feats[seq])
+            # Join the base directory with the relative path from the scp
+            full_path = os.path.join(base_dir, self.feats[seq])
+            feats.append(full_path)
             lens.append(self.lens[seq])
 
         return keys, feats, lens

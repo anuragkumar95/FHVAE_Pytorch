@@ -12,7 +12,7 @@ import numpy as np
 from Datasets.datasets_eeg import NumpyEEGDataset
 from Datasets.datasets import NumpyDataset
 from utils import (
-    save_checkpoint,
+    # save_checkpoint,
     check_best,
 )
 import wandb
@@ -185,7 +185,7 @@ class Trainer:
         }
         save_path = os.path.join(self.exp_dir, f"best_checkpoint_best_{kwargs.get('save_metric', 'model')}.pt")
         torch.save(save_dict, save_path)
-        self.config['model_params']['n_seqs'] = self.train_ds.n_seqs
+        self.config['model_args']['n_seqs'] = self.train_ds.n_seqs
         with open(f"{self.exp_dir}/config.json", 'w') as f:
             json.dump(self.config, f)
         print(f"Checkpoint saved at {save_path}")
@@ -213,6 +213,8 @@ class Trainer:
         best_val_lb = -np.inf
         best_val_likelihood = -np.inf
 
+        total_steps = self.epochs * len(self.train_loader) # total steps for annealing 
+
         self.model.double()
         for epoch in range(self.start_epoch, self.epochs):
             # training
@@ -233,6 +235,12 @@ class Trainer:
                 batch_neg_kld_z2 = 0.0
                 batch_log_pmu2 = 0.0
                 batch_mse = 0.0
+
+                # start annealing 
+                current_step = epoch * len(self.train_loader) + batch_idx
+                # Reach full weight (1.0) by 20% of total training
+                beta = min(1.0, current_step / (0.2 * total_steps))
+
                 self.optimizer.zero_grad()
                 for _ in range(self.accum_grad):
                     try:
@@ -248,11 +256,15 @@ class Trainer:
                     lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
                         x=features, mu_idx=idxs, num_seqs=self.train_ds.num_seqs, num_segs=nsegs
                     )
-                    loss = loss_function(lower_bound, discrim_loss, self.config['training_args']['alpha_dis']) / self.accum_grad
+
+                    # Calculate the weighted lower bound using beta
+                    weighted_lb = log_px_z + beta * (neg_kld_z1 + neg_kld_z2) + (log_pmu2 / nsegs)
+
+                    loss = loss_function(weighted_lb, discrim_loss, self.config['training_args']['alpha_dis']) / self.accum_grad
                     mse = ((x_pred - features)**2).mean().item()
                     loss.backward()
                 
-                    batch_lb += lower_bound.mean().item() / self.accum_grad
+                    batch_lb += weighted_lb.mean().item() / self.accum_grad
                     batch_disc_loss += discrim_loss.mean().item() / self.accum_grad
                     batch_log_px_z += log_px_z.mean().item() / self.accum_grad
                     batch_neg_kld_z1 += neg_kld_z1.mean().item() / self.accum_grad
