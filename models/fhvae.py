@@ -1,3 +1,5 @@
+from json import encoder
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -9,7 +11,18 @@ from models.layers import (
     LatentSegEncoder,
     LatentSeqEncoder,
     LSTMDecoder,
+    JointLatentSeqEncoder,
+    JointLatentSeqEncoder2,
+    TransformerSegEncoder,
+    TransformerSeqEncoder
 )
+
+from models.spk_classifier import SpeakerClassifier
+from models.losses import (
+    InfoNCELoss, 
+)
+
+
 
 class FHVAE(nn.Module):
     def __init__(
@@ -21,7 +34,8 @@ class FHVAE(nn.Module):
         z1_dim=16,
         z2_dim=16,
         x_hus=128,
-        n_LSTM_layers=1, 
+        n_layers=1,
+        encoder_type='LSTM',
     ):
         super().__init__()
         self.model = "fhvae"
@@ -40,23 +54,40 @@ class FHVAE(nn.Module):
         #Lookup table
         self.mu2_table = nn.Embedding(num_embeddings=n_seqs, embedding_dim=z2_dim)       
 
-        self.z1_encoder = LatentSegEncoder(
-            input_size=input_size+self.z1_dim, 
-            output_size=self.z1_dim,
-            hus=self.z1_hus, 
-            n_LSTM_layers=n_LSTM_layers
-        )
-        self.z2_encoder = LatentSeqEncoder(
-            input_size=input_size, 
-            output_size=self.z2_dim,
-            hus=self.z2_hus, 
-            n_LSTM_layers=n_LSTM_layers
-        )
+        if encoder_type == 'LSTM':
+            self.z1_encoder = LatentSegEncoder(
+                input_size=input_size+self.z1_dim, 
+                output_size=self.z1_dim,
+                hus=self.z1_hus, 
+                n_LSTM_layers=n_layers
+            )
+            self.z2_encoder = LatentSeqEncoder(
+                input_size=input_size, 
+                output_size=self.z2_dim,
+                hus=self.z2_hus, 
+                n_LSTM_layers=n_layers
+            )
+        elif encoder_type == 'Transformer':
+            self.z1_encoder = TransformerSegEncoder(
+                input_size=input_size+self.z1_dim, 
+                output_size=self.z1_dim,
+                hus=self.z1_hus, 
+                n_layers=n_layers
+            )
+            self.z2_encoder = TransformerSeqEncoder(
+                input_size=input_size, 
+                output_size=self.z2_dim,
+                hus=self.z2_hus, 
+                n_layers=n_layers
+            )
+        else:
+            raise ValueError(f"Encoder type {encoder_type} not supported. Use 'LSTM' or 'Transformer'.")
+        
         self.decoder = LSTMDecoder(
             input_size=self.z1_dim+self.z2_dim, 
             output_size=input_size,
             hus=self.x_hus, 
-            n_LSTM_layers=n_LSTM_layers
+            n_LSTM_layers=n_layers
         )
         self.loss = nn.CrossEntropyLoss()
 
@@ -84,8 +115,8 @@ class FHVAE(nn.Module):
     
     def extract_z1(self, x):
         """Extract z1 latent features"""
-        _, _, z2_sample = self.extract_z2(x)
-        return self.z1_encoder(x, z2_sample)
+        z2_mu, _, _ = self.extract_z2(x)
+        return self.z1_encoder(x, z2_mu)
     
     def extract_latents(self, x):
         """Extract z1, z2 latent features"""
@@ -127,7 +158,8 @@ class FHVAE(nn.Module):
         # Get z2 latents
         z2_mu, z2_logvar, z2_sample = self.z2_encoder(x)
         qz2_x = [z2_mu, z2_logvar]
-
+        
+        pz2 = [0, np.log(0.5 ** 2).astype(np.float32)]
         if mode == 'train':
             #mu2_table, mu2 = self.mu2_lookup(mu_idx, self.z2_dim, num_seqs, device=x.device)
             mu2 = self.mu2_table(mu_idx)
@@ -137,7 +169,6 @@ class FHVAE(nn.Module):
             # thus, z2_mu should be summed along the first dim 0.
             mu2 = z2_mu.sum(0) / (x.shape[0] + (np.exp(pz2[1]) / np.exp(self.pmu2[1])))
             mu2 = mu2.repeat(x.shape[0], 1)
-            pz2[0] = mu2
 
         # z2 prior
         pz2 = [mu2, np.log(0.5 ** 2).astype(np.float32)]
@@ -191,4 +222,76 @@ class FHVAE(nn.Module):
         latents = self.extract_latents(x)
         z1 = latents['z1']['mu']
         z2 = latents['z2']['mu']
-        return self.reconstruct_latents(z1, z2, seq_len=x.shape[1])
+        return self.reconstruct_latents(z1, z2, x.shape[1])
+    
+
+class FHVAEwithSpkID(FHVAE):
+    def __init__(
+        self,
+        input_size,
+        n_seqs, 
+        z1_hus=128,
+        z2_hus=128,
+        z1_dim=16,
+        z2_dim=16,
+        x_hus=128,
+        n_layers=1,
+        encoder_type='LSTM',
+        n_speakers=13, 
+        loss='nce'
+    ):
+        super().__init__(input_size, n_seqs, z1_hus, z2_hus, z1_dim, z2_dim, x_hus, n_layers, encoder_type)
+
+        self.loss_type = loss
+        self.sim_loss = InfoNCELoss()
+        self.spk_classification_head = SpeakerClassifier(
+            input_size=z2_dim,
+            num_speakers=n_speakers,
+            hus = 512
+        )
+
+    def accuracy(self, logits, labels):
+        _, preds = torch.max(logits, 1)
+        correct = (preds == labels).sum()
+        return correct / labels.size(0)
+    
+    def _kld(self, p_mu, p_logvar, q_mu, q_logvar):
+        """Compute D_KL(p || q) of two Gaussians"""
+        return -0.5 * (
+            1
+            + p_logvar
+            - q_logvar
+            - (torch.pow(p_mu - q_mu, 2) + torch.exp(p_logvar)) / torch.exp(q_logvar)
+        )
+
+    def forward(
+            self, x: torch.Tensor, mu_idx: torch.Tensor, num_seqs: int, num_segs: int, s_labels: torch.Tensor, mode: str = 'train'
+        ):
+
+        outputs = super().forward(x=x, mu_idx=mu_idx, num_seqs=num_seqs, num_segs=num_segs, mode=mode)
+        
+
+        ############################# MUTUAL INFO (InfoNCE) ############################
+        
+        _, _, z2_sample = self.z2_encoder(x)
+        _, _, z1_sample = self.z1_encoder(x, z2_sample)
+
+        # info_nce where we match same spk embeddings and move the same diff spk embeddings away
+        z1_z2 = torch.cat([z1_sample, z2_sample], dim=-1)
+        nce_loss_spk = self.sim_loss(z1_z2, z1_z2, labels=s_labels) 
+        
+        ######################### SPK CLASSIFICATION ##########################
+
+        logits = self.spk_classification_head(z1_z2.detach())
+        ce_loss = self.loss(logits, s_labels)
+        acc = self.accuracy(logits, s_labels)
+        spk_outputs = {
+            'spk_ce_loss': ce_loss,
+            'acc': acc, 
+            'spk_infonce_loss': nce_loss_spk
+        }
+
+        return outputs, spk_outputs
+
+    
+

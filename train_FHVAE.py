@@ -209,7 +209,6 @@ class Trainer:
         return rt
 
     def train(self):
-
         best_val_lb = -np.inf
         best_val_likelihood = -np.inf
 
@@ -273,7 +272,7 @@ class Trainer:
                         "Loss": batch_loss / features.shape[1],
                         "MSE": mse,
                         "LowerBound": batch_lb / features.shape[1],
-                        "Discrim_Loss": batch_disc_loss / features.shape[1],
+                        "Discrim_Loss": -batch_disc_loss / features.shape[1],
                         "Step": epoch * len(self.train_loader) + (batch_idx + 1),
                         "Likelihood P(x|z)": batch_log_px_z / features.shape[1],
                         "KL(q(z1|x,z2)||p(z1))": (-batch_neg_kld_z1) / features.shape[1],

@@ -278,6 +278,7 @@ class NumpyDataset(BaseDataset):
         self,
         feat_scp: Path,
         len_scp: Path,
+        phone_scp: Path = None,
         min_len: int = 1,
         mvn_path: str = None,
         seg_len: int = 20,
@@ -349,40 +350,3 @@ class NumpyDataset(BaseDataset):
         return {"mean": mean.tolist(), "std": std.tolist()}
 
 
-# class KaldiDataset(BaseDataset):
-#     def __init__(
-#         self,
-#         feat_scp: Path,
-#         len_scp: Path,
-#         min_len: int = 1,
-#         mvn_path: str = None,
-#         seg_len: int = 20,
-#         seg_shift: int = 8,
-#         rand_seg: bool = False,
-#     ):
-#         super().__init__(
-#             feat_scp, len_scp, min_len, mvn_path, seg_len, seg_shift, rand_seg
-#         )
-#         self._mvn_prep(mvn_path)
-
-#     def __getitem__(self, index):
-#         """Returns key(sequence), feature, and number of segments."""
-#         seg = self.segs[index]
-#         idx = self.seq2idx[seg.seq]
-#         feat = load_mat(self.seq_feats[idx])[seg.start : seg.end]
-#         feat = self.apply_mvn(feat)
-#         nsegs = self.seq_nsegs[idx]
-
-#         return idx, feat, nsegs
-
-#     def _compute_mvn(self):
-#         """Compute mean and variance normalization."""
-#         n, x, x2 = 0.0, 0.0, 0.0
-#         for seq in self.seqlist:
-#             feat = load_mat(self.feats[seq])
-#             x += np.sum(feat, axis=0, keepdims=True)
-#             x2 += np.sum(feat ** 2, axis=0, keepdims=True)
-#             n += feat.shape[0]
-#         mean = x / n
-#         std = np.sqrt(x2 / n - mean ** 2)
-#         return {"mean": mean, "std": std}
