@@ -6,7 +6,7 @@ import random
 from tqdm import tqdm
 import torch
 from pathlib import Path
-from models.fhvae import FHVAE
+from models.fhvae import FHVAE, FHVAEwithSpkID
 from torch.optim import Adam
 import numpy as np
 from Datasets.datasets_eeg import NumpyEEGDataset
@@ -55,7 +55,7 @@ def loss_function(lower_bound, log_qy, alpha=10.0):
         Segment variational lower bound plus the (weighted) discriminative objective.
 
     """
-    return -torch.mean(lower_bound + alpha * log_qy)
+    return -1 * torch.mean(lower_bound + alpha * log_qy)
 
 
 def check_terminate(epoch, best_epoch, patience, epochs):
@@ -89,7 +89,6 @@ class Trainer:
             self.test_ds = NumpyEEGDataset(
                 **config['data_args'], split='test'
             )
-            
         if config['task'] == 'timit':
             ds_dir = config['dataset_dir']
             self.train_ds = NumpyDataset(
@@ -145,10 +144,19 @@ class Trainer:
         )
 
         # Config model, optimizer
-        self.model = FHVAE(
-            **config['model_args'],
-            n_seqs=self.train_ds.n_seqs,
-        ).to(self.device).double()
+        self.model_type = config.get('model_type', None)
+        if self.model_type == 'FHVAE+spkID':
+            self.model = FHVAEwithSpkID(
+                **config['model_args'], 
+                n_seqs=self.train_ds.n_seqs
+            ).to(self.device).double()
+            #raise NotImplementedError("ThreeVarFHVAE is not implemented yet")
+        else:
+            self.model = FHVAE(
+                **config['model_args'], 
+                n_seqs=self.train_ds.n_seqs
+            ).to(self.device).double()
+
         if parallel and rank is not None:
             self.model = DDP(
                 self.model, device_ids=[rank], output_device=rank
@@ -163,6 +171,8 @@ class Trainer:
             self.load_checkpoint(args.resume_pt, map_location=self.device)
 
         self.accum_grad = self.config['training_args']['accum_grad']
+
+        print(f"MODEL:\n{self.model}")
 
         # Logging
         if self.rank == 0:
@@ -185,7 +195,7 @@ class Trainer:
         }
         save_path = os.path.join(self.exp_dir, f"best_checkpoint_best_{kwargs.get('save_metric', 'model')}.pt")
         torch.save(save_dict, save_path)
-        self.config['model_params']['n_seqs'] = self.train_ds.n_seqs
+        self.config['model_args']['n_seqs'] = self.train_ds.n_seqs
         with open(f"{self.exp_dir}/config.json", 'w') as f:
             json.dump(self.config, f)
         print(f"Checkpoint saved at {save_path}")
@@ -200,6 +210,8 @@ class Trainer:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.start_epoch = checkpoint.get('epoch', 0) + 1
+        
+        print(f"Loaded checkpoint from {checkpoint_path}, starting at epoch {self.start_epoch}")
 
     def reduce_tensor(self, tensor, world_size):
         """Sums a tensor across all GPUs and divides by world_size to get the mean."""
@@ -209,6 +221,7 @@ class Trainer:
         return rt
 
     def train(self):
+
         best_val_lb = -np.inf
         best_val_likelihood = -np.inf
 
@@ -231,6 +244,7 @@ class Trainer:
                 batch_neg_kld_z1 = 0.0
                 batch_neg_kld_z2 = 0.0
                 batch_log_pmu2 = 0.0
+                
                 batch_mse = 0.0
                 self.optimizer.zero_grad()
                 for _ in range(self.accum_grad):
@@ -244,9 +258,14 @@ class Trainer:
                     idxs = idxs.to(self.device)
                     nsegs = nsegs.to(self.device)
 
-                    lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
-                        x=features, mu_idx=idxs, num_seqs=self.train_ds.num_seqs, num_segs=nsegs
-                    )
+                    if self.model_type != 'FHVAE+spkID':
+                        lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
+                            x=features, mu_idx=idxs, num_seqs=self.train_ds.n_seqs, num_segs=nsegs
+                        )
+                    else:
+                        (lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred), spk_outputs = self.model(
+                            x=features, mu_idx=idxs, num_seqs=self.train_ds.n_seqs, num_segs=nsegs
+                        )
                     loss = loss_function(lower_bound, discrim_loss, self.config['training_args']['alpha_dis']) / self.accum_grad
                     mse = ((x_pred - features)**2).mean().item()
                     loss.backward()
@@ -259,6 +278,11 @@ class Trainer:
                     batch_log_pmu2 += log_pmu2.mean().item() / self.accum_grad
                     batch_mse += mse / self.accum_grad
                     batch_loss += loss.item() / self.accum_grad
+
+                    if self.model_type == 'ThreeVar':
+                        batch_disc_loss3 += discrim_loss3.mean().item() / self.accum_grad
+                        batch_log_pmu3 += log_pmu3.mean().item() / self.accum_grad
+                        batch_neg_kld_z3 += neg_kld_z3.mean().item() / self.accum_grad
 
                 self.optimizer.step()
                 train_loss += batch_loss
@@ -273,11 +297,14 @@ class Trainer:
                         "MSE": mse,
                         "LowerBound": batch_lb / features.shape[1],
                         "Discrim_Loss": -batch_disc_loss / features.shape[1],
+                        "Discrim_Loss3": -batch_disc_loss3 / features.shape[1],
                         "Step": epoch * len(self.train_loader) + (batch_idx + 1),
                         "Likelihood P(x|z)": batch_log_px_z / features.shape[1],
-                        "KL(q(z1|x,z2)||p(z1))": (-batch_neg_kld_z1) / features.shape[1],
-                        "KL(q(z2|x)||p(z2|mu2))": (-batch_neg_kld_z2) / features.shape[1],
+                        "KL_z1": (-batch_neg_kld_z1) / features.shape[1],
+                        "KL_z2": (-batch_neg_kld_z2) / features.shape[1],
+                        "KL_z3": (-batch_neg_kld_z3) / features.shape[1],
                         "Log p(mu2)": batch_log_pmu2 / features.shape[1],
+                        "Log p(mu3)": batch_log_pmu3 / features.shape[1],
                     })
 
             train_loss /= len(self.train_loader)
@@ -290,7 +317,9 @@ class Trainer:
             VAL_PX_Z = 0
             VAL_KLD_Z1 = 0
             VAL_KLD_Z2 = 0
+            VAL_KLD_Z3 = 0
             VAL_LOG_PMU2 = 0
+            VAL_LOG_PMU3 = 0
             with torch.no_grad():
                 pbar = tqdm(self.val_loader)
                 batch_idx = 1
@@ -301,12 +330,17 @@ class Trainer:
                     nsegs = nsegs.to(self.device)
 
                     feature = feature.squeeze(0)
-                    if self.config['task'] == 'eeg':
-                        feature = feature.permute(2,0,1)
+                    # if self.config['task'] == 'eeg':
+                    #     feature = feature.permute(2,0,1)
 
-                    val_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
-                        feature, idxs, self.val_ds.num_seqs, nsegs, mode='val'
-                    )
+                    if self.model_type != 'ThreeVar':
+                        val_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
+                            feature, idxs, self.val_ds.n_seqs, nsegs, mode='val'
+                        )
+                    else:
+                        val_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, neg_kld_z3, (log_pmu2, log_pmu3), x_pred = self.model(
+                            feature, idxs, self.val_ds.n_seqs, nsegs, mode='val'
+                        )
                     mse = ((x_pred - feature)**2).mean().item()
 
                     VAL_LB += val_lower_bound.mean().item()/feature.shape[1]
@@ -315,6 +349,10 @@ class Trainer:
                     VAL_KLD_Z1 += (-neg_kld_z1).mean().item()/feature.shape[1] 
                     VAL_KLD_Z2 += (-neg_kld_z2).mean().item()/feature.shape[1]
                     VAL_LOG_PMU2 += log_pmu2.mean().item()/feature.shape[1]
+
+                    if self.model_type == 'ThreeVar':
+                        VAL_KLD_Z3 += (-neg_kld_z3).mean().item()/feature.shape[1]
+                        VAL_LOG_PMU3 += log_pmu3.mean().item()/feature.shape[1]
                     
                     pbar.set_postfix({
                         "Epoch": epoch,
@@ -329,6 +367,8 @@ class Trainer:
                 self.reduce_tensor(VAL_KLD_Z1, self.world_size)
                 self.reduce_tensor(VAL_KLD_Z2, self.world_size)
                 self.reduce_tensor(VAL_LOG_PMU2, self.world_size)
+                self.reduce_tensor(VAL_LOG_PMU3, self.world_size)
+                self.reduce_tensor(VAL_KLD_Z3, self.world_size)
 
             VAL_LB /= len(self.val_loader)
             VAL_MSE /= len(self.val_loader)
@@ -336,15 +376,19 @@ class Trainer:
             VAL_KLD_Z1 /= len(self.val_loader)
             VAL_KLD_Z2 /= len(self.val_loader)
             VAL_LOG_PMU2 /= len(self.val_loader)
+            VAL_KLD_Z3 /= len(self.val_loader)
+            VAL_LOG_PMU3 /= len(self.val_loader)
 
             if self.rank == 0:
                 wandb.log({
                     "Val_MSE": VAL_MSE,
                     "Val_LowerBound": VAL_LB,
                     "Val_Likelihood P(x|z)": VAL_PX_Z,
-                    "Val_KL(q(z1|x,z2)||p(z1))": VAL_KLD_Z1,
-                    "Val_KL(q(z2|x)||p(z2|mu2))": VAL_KLD_Z2,
+                    "Val_KL_z1": VAL_KLD_Z1,
+                    "Val_KL_z2": VAL_KLD_Z2,
+                    "Val_KL_z3": VAL_KLD_Z3,
                     "Val_Log p(mu2)": VAL_LOG_PMU2,
+                    "Val_Log p(mu3)": VAL_LOG_PMU3,
                     "Epoch": epoch
                 })
 
@@ -357,6 +401,8 @@ class Trainer:
             TEST_KLD_Z1 = 0
             TEST_KLD_Z2 = 0
             TEST_LOG_PMU2 = 0
+            TEST_KLD_Z3 = 0
+            TEST_LOG_PMU3 = 0
             with torch.no_grad():
                 pbar = tqdm(self.test_loader)
                 batch_idx = 1
@@ -367,12 +413,17 @@ class Trainer:
                     nsegs = nsegs.to(self.device)
 
                     feature = feature.squeeze(0)
-                    if self.config['task'] == 'eeg':
-                        feature = feature.permute(2,0,1)
-                
-                    test_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
-                        feature, idxs, self.test_ds.num_seqs, nsegs, mode='test'
-                    )
+                    # if self.config['task'] == 'eeg':
+                    #     feature = feature.permute(2,0,1)
+
+                    if self.model_type != 'ThreeVar':
+                        test_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
+                            feature, idxs, self.test_ds.n_seqs, nsegs, mode='test'
+                        )
+                    else:
+                        test_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, neg_kld_z3, (log_pmu2, log_pmu3), x_pred = self.model(
+                            feature, idxs, self.test_ds.n_seqs, nsegs, mode='test'
+                        )
                     
                     mse = ((x_pred - feature)**2).mean().item()
 
@@ -382,6 +433,10 @@ class Trainer:
                     TEST_KLD_Z1 += (-neg_kld_z1).mean().item()/feature.shape[1] 
                     TEST_KLD_Z2 += (-neg_kld_z2).mean().item()/feature.shape[1]
                     TEST_LOG_PMU2 += log_pmu2.mean().item()/feature.shape[1]
+
+                    if self.model_type == 'ThreeVar':
+                        TEST_KLD_Z3 += (-neg_kld_z3).mean().item()/feature.shape[1]
+                        TEST_LOG_PMU3 += log_pmu3.mean().item()/feature.shape[1]
                     
                     pbar.set_postfix({
                         "Epoch": epoch,
@@ -396,6 +451,8 @@ class Trainer:
                 self.reduce_tensor(TEST_KLD_Z1, self.world_size)
                 self.reduce_tensor(TEST_KLD_Z2, self.world_size)
                 self.reduce_tensor(TEST_LOG_PMU2, self.world_size)
+                self.reduce_tensor(TEST_KLD_Z3, self.world_size)
+                self.reduce_tensor(TEST_LOG_PMU3, self.world_size)
 
             TEST_LB /= len(self.test_loader)
             TEST_MSE /= len(self.test_loader)
@@ -403,15 +460,19 @@ class Trainer:
             TEST_KLD_Z1 /= len(self.test_loader)
             TEST_KLD_Z2 /= len(self.test_loader)
             TEST_LOG_PMU2 /= len(self.test_loader)
+            TEST_KLD_Z3 /= len(self.test_loader)
+            TEST_LOG_PMU3 /= len(self.test_loader)
 
             if self.rank == 0:
                 wandb.log({
                     "Test_MSE": TEST_MSE,
                     "Test_LowerBound": TEST_LB,
                     "Test_Likelihood P(x|z)": TEST_PX_Z,
-                    "Test_KL(q(z1|x,z2)||p(z1))": TEST_KLD_Z1,
-                    "Test_KL(q(z2|x)||p(z2|mu2))": TEST_KLD_Z2,
+                    "Test_KL_z1": TEST_KLD_Z1,
+                    "Test_KL_z2": TEST_KLD_Z2,
                     "Test_Log p(mu2)": TEST_LOG_PMU2,
+                    "Test_KL_z3": TEST_KLD_Z3,
+                    "Test_Log p(mu3)": TEST_LOG_PMU3,
                     "Epoch": epoch
                 })
 
