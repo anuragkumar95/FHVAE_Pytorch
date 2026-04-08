@@ -21,215 +21,15 @@ class Segment(object):
     def __repr__(self):
         return str(self)
 
-class BaseDataset(Dataset):
-    def __init__(
-        self,
-        csv: Path,
-        min_len: int = 1,
-        mvn_path: str = None,
-        seg_len: int = 32,
-        seg_shift: int = 24,
-        rand_seg: bool = False,
-    ):
-        """
-        Args:
-            feat_scp:  Feature scp path
-            len_scp:   Sequence-length scp path
-            min_len:   Keep sequence no shorter than min_len
-            mvn_path:       Path to file storing the mean and variance of the sequences
-                                for normalization
-            seg_len:   Segment length
-            seg_shift: Segment shift if seg_rand is False; otherwise randomly
-                                extract floor(seq_len/seg_shift) segments per sequence
-            rand_seg: If True, randomly extract segments
-        """
-        
-        self.csv = csv
-
-        self.seg_len = seg_len
-        self.seg_shift = seg_shift
-        self.rand_seg = rand_seg
-
-        self.seqs = []
-        for _, row in self.csv.iterrows():
-            seq_id = f"{row['subj']}_{row['sess']}_{row['trial']}"
-            self.seqs.append(seq_id)
-        self.seq2idx = dict([(seq, i) for i, seq in enumerate(self.seqs)])
-        self.idx2seq = dict([(i, seq) for i, seq in enumerate(self.seqs)])
-        self.seq_lens = self.csv['lens'].tolist()
-
-        self.segs, self.seq_nsegs = self._make_segs(
-            self.seqs, self.seq_lens, self.seg_len, self.seg_shift, self.rand_seg
-        )
-
-    def apply_mvn(self, feats):
-        """Apply mean and variance normalization."""
-        if self.mvn_params is None:
-            return feats
-        else:
-            return (feats - self.mvn_params["mean"]) / self.mvn_params["std"]
-
-    def _mvn_prep(self, mvn_path):
-        if mvn_path is not None:
-            if not os.path.exists(mvn_path):
-                self.mvn_params = self._compute_mvn()
-                with open(mvn_path, "w") as f:
-                    json.dump(self.mvn_params, f)
-            else:
-                with open(mvn_path) as f:
-                    self.mvn_params = json.load(f)
-        else:
-            self.mvn_params = None
-
-    def _compute_mvn(self):
-        """Compute mean and variance normalization."""
-        n, x, x2 = 0.0, 0.0, 0.0
-        for _, row in self.csv.iterrows():
-            feat_path = row['eeg_path']
-            with open(feat_path, "rb") as f:
-                feat = np.load(f)
-            x += np.sum(feat, axis=1, keepdims=True)
-            x2 += np.sum(feat ** 2, axis=1, keepdims=True)
-            n += feat.shape[0]
-        mean = x / n
-        std = np.sqrt(x2 / n - mean ** 2)
-        return {"mean": mean.tolist(), "std": std.tolist()}
-
-    def undo_mvn(self, feats):
-        """Undo mean and variance normalization."""
-        if self.mvn_params is None:
-            return feats
-        else:
-            return feats * self.mvn_params["std"] + self.mvn_params["mean"]
-
-    def __len__(self):
-        #return len(self.seqlist)
-        """Better to override further down to get custom length access"""
-        raise NotImplementedError()
-
-    def __getitem__(self, index):
-        """Returns key(sequence), feature, and number of segments."""
-        raise NotImplementedError()
-
-    def _make_seq_lists(self, seqlist):
-        """Return lists of all sequences and the corresponding features and lengths."""
-        keys, feats, lens = [], [], []
-        for seq in seqlist:
-            keys.append(seq)
-            feats.append(self.feats[seq])
-            lens.append(self.lens[seq])
-
-        return keys, feats, lens
-
-    def _make_segs(
-        self,
-        seqs: list,
-        lens: list,
-        seg_len: int = 20,
-        seg_shift: int = 8,
-        rand_seg: bool = False,
-    ):
-        """Make segments from a list of sequences.
-
-        Args:
-            seqs:      List of sequences
-            lens:      List of sequence lengths
-            seg_len:   Segment length
-            seg_shift: Segment shift if rand_seg is False; otherwise randomly
-                           extract floor(seq_len/seg_shift) segments per sequence
-            rand_seg:  If True, randomly extract segments
-        """
-        segs = []
-        nsegs = []
-        for seq, l in zip(seqs, lens):
-            nseg = (l - seg_len) // seg_shift + 1
-            nsegs.append(nseg)
-            if rand_seg:
-                starts = np.random.choice(range(l - seg_len + 1), nseg)
-            else:
-                starts = np.arange(nseg) * seg_shift
-            for start in starts:
-                end = start + seg_len
-                segs.append(Segment(seq, start, end))
-        return segs, nsegs
-
-class NumpyEEGDataset(BaseDataset):
-    def __init__(
-        self,
-        csv: Path,
-        min_len: int = 1,
-        mvn_path: str = None,
-        seg_len: int = 20,
-        seg_shift: int = 8,
-        rand_seg: bool = False,
-        split='train',
-    ):
-        """
-        Args:
-            csv:       Path the csv file containing seq information
-            min_len:   Keep sequence no shorter than min_len
-            seg_len:   Segment length
-            seg_shift: Segment shift if seg_rand is False; otherwise randomly
-                                extract floor(seq_len/seg_shift) segments per sequence
-            rand_seg: If True, randomly extract segments
-        """
-        print(f"Preparing {split} dataset. If creating the val/test dataset, make sure the bs is set to 1.")
-        csv = pd.read_csv(csv)
-        grouped = csv.groupby('split')
-        for name, group in grouped:
-            if name == split:
-                csv = group.reset_index(drop=True)
-        del grouped
-
-        super().__init__(
-            csv, min_len, mvn_path, seg_len, seg_shift, rand_seg
-        )
-
-        self._mvn_prep(mvn_path)
-        self.n_seqs = len(self.seqs)
-        self.split = split
-        self.eeg_paths = list(self.csv['eeg_path'])
-        assert len(self.eeg_paths) == len(self.seqs)
-        print(f"{split} {self.__class__.__name__} created with {len(self.segs)} segments and {self.n_seqs} seqs.")
-
-    def __len__(self, ):  
-        if self.split == 'train':
-            return len(self.segs)
-        else:
-            return len(self.seqs)
-
-    def __getitem__(self, index):
-        """Returns key(sequence), feature, and number of segments."""
-        if self.split == 'train':
-            seg = self.segs[index]
-            idx = self.seq2idx[seg.seq]
-            with open(self.eeg_paths[idx], "rb") as f:
-                feat = np.load(f)[:, seg.start : seg.end]
-            feat = self.apply_mvn(feat)
-            nsegs = self.seq_nsegs[idx]
-            feat = feat.T
-        else:
-            seq = self.seqs[index]
-            segs = [seg for seg in self.segs if seg.seq == seq]
-            with open(self.eeg_paths[index], "rb") as fp:
-                f = np.load(fp)
-            f = self.apply_mvn(f)
-            feat = []
-            for seg in segs:
-                f_t = f[:, seg.start : seg.end].T
-                feat.append(f_t[np.newaxis, :, :])
-            feat = np.concatenate(feat, axis=0)
-            idx = np.asarray([-1 for i in range(feat.shape[0])])
-            nsegs = np.asarray([feat.shape[0] for i in range(feat.shape[0])])
-        return idx, feat, nsegs
-    
-
 class Joint_AUD_EEG_Dataset(Dataset):
-    def __init__(self, root_dir, csv, mvn_path, seg_len, seg_shift, rand_seg, split, subj_norm=False):
+    def __init__(self, root_dir, csv, mvn_path, seg_len, seg_shift, rand_seg, split, ds='all'):
         super().__init__()
+        self.csv = pd.read_csv(csv)
+        if ds != 'all':
+            self.csv = self.csv[self.csv['dataset']==ds]
+            
         print(f"Preparing {split} dataset. If creating the val/test dataset, make sure the bs is set to 1.")
         if isinstance(csv, str) or isinstance(csv, Path):
-            self.csv = pd.read_csv(csv)
             grouped = self.csv.groupby('split')
             for name, group in grouped:
                 if name == split:
@@ -240,50 +40,29 @@ class Joint_AUD_EEG_Dataset(Dataset):
 
         self.root = root_dir
 
-        self.spk_map = {
-            "podcast": "spk-00",
-            "audiobook_1":"spk-01",
-            "audiobook_2":"spk-02",
-            "audiobook_3":"spk-02",
-            "audiobook_4": "spk-03",
-            "audiobook_5": "spk-04",
-            "audiobook_6": "spk-04",
-            "audiobook_7": "spk-05",
-            "audiobook_8": "spk-06",
-            "audiobook_9": "spk-07",
-            "audiobook_10": "spk-08",
-            "audiobook_11": "spk-09",
-            "audiobook_12": "spk-10",
-            "audiobook_13": "spk-11",
-            "audiobook_14": "spk-12",
-        }
+        self.speakers = self.csv['speaker'].tolist()
+        self.spk2idx = {val: i for i, val in enumerate(self.csv['speaker'].unique())}
 
-        self.spk2idx = {}
-        for _, v in self.spk_map.items():
-            if v not in self.spk2idx:
-                curr_idx = len(self.spk2idx)
-                self.spk2idx[v] = curr_idx
-
-        self.mvn_params = {'eeg':{}, 'spec':{}}
-        self.subj_mvn_params = {}
+        self.stimuli = list(self.csv['stimuli'].unique())
+        self.aud_seq2idx = {val: i for i, val in enumerate(self.stimuli)}
+        self.aud_idx2seq = {i: val for i, val in enumerate(self.stimuli)}
+        
+        self.mvn_params = {}
         self._mvn_prep(mvn_path)
-    
-        self.eeg_sr = 64
+        
         self.aud_fr = 100 #Frame rate of spectrograms
+        self.eeg_sr = 128
         self.seg_len = seg_len
         self.seg_shift = seg_shift
         self.rand_seg = rand_seg
         self.split = split
-        self.subj_norm = subj_norm
 
         self.seqs = []
+        self.subjects = []
+        self.eeg_sr_list = self.csv['sr'].to_list()
         self.seq_lens = self.csv['lens'].to_list()
         self.eeg_paths = self.csv['eeg_path'].to_list()
-        self.spec_paths = self.csv['sti_feature_path'].to_list()
-
-        # Computing subject mean and variation
-        print('Computing subject mean and variance')
-        self._compute_subj_mvn()
+        self.spec_paths = self.csv['sti_feature_path'].unique().tolist()
 
         print(f"Loading spectograms for faster access...")
         self.specs = {}
@@ -295,49 +74,47 @@ class Joint_AUD_EEG_Dataset(Dataset):
                 self.specs[path] = f
 
         for _, row in self.csv.iterrows():
-            seq_id = f"{row['subj']}_{row['sess']}_{row['trial']}"
+            seq_id = f"{row['subject']}_{row['sess']}_{row['trial']}"
+            subj_id = f"{row['dataset']}_{row['subject']}"
             self.seqs.append(seq_id)
-        self.seq2idx = dict([(seq, i) for i, seq in enumerate(self.seqs)])
-        self.idx2seq = dict([(i, seq) for i, seq in enumerate(self.seqs)])
+            self.subjects.append(subj_id)
+
+        self.sub2idx = {val: i for i, val in enumerate(set(self.subjects))}
+
+        self.eeg_seq2idx = dict([(seq, i) for i, seq in enumerate(self.seqs)])
+        self.eeg_idx2seq = dict([(i, seq) for i, seq in enumerate(self.seqs)])
 
         self.esegs, self.asegs, self.seq_nsegs = self._make_segs(
-            self.seqs, self.seq_lens, self.seg_len, self.seg_shift, self.rand_seg
+            self.seqs, self.seq_lens, self.eeg_sr_list, self.seg_len, self.seg_shift, self.rand_seg
         )
-        self.n_seqs = len(self.seqs)
-        print(f"Joint Dataset with {len(self.esegs)} segs and {len(self.seqs)} seqs")
 
-    def _compute_subj_mvn(self, ):
-        """Compute mean and variance normalization."""
-        compute = {}
-        for _, row in self.csv.iterrows():
-            subj = row['subj']
-            if subj not in self.subj_mvn_params:
-                self.subj_mvn_params[subj] = {'mean':0, 'std':0}
-            if subj not in compute:
-                compute[subj] = {'x':0, 'x2':0, 'n':0}
-            feat_path = row['eeg_path'].replace('ROOT', self.root)
-            with open(feat_path, "rb") as f:
-                feat = np.load(f)
+        self.sub_nsegs = [0 for _ in self.sub2idx]
+        self.spk_nsegs = [0 for _ in self.spk2idx]
+        self.aud_nsegs = [0 for _ in self.aud_seq2idx]
+        for i, spk in enumerate(self.speakers):
+            spk_idx = self.spk2idx[spk]
+            self.spk_nsegs[spk_idx] += self.seq_nsegs[i]
+        for i, sub in enumerate(self.subjects):
+            sub_idx = self.sub2idx[sub]
+            self.sub_nsegs[sub_idx] += self.seq_nsegs[i]
+        for i, sti in enumerate(self.csv['stimuli']):
+            sti_idx = self.aud_seq2idx[sti]
+            self.aud_nsegs[sti_idx] += self.seq_nsegs[i]
             
-            compute[subj]['x'] += np.sum(feat, axis=1, keepdims=True)
-            compute[subj]['x2'] += np.sum(feat ** 2, axis=1, keepdims=True)
-            compute[subj]['n'] += feat.shape[1]
-        
-        for subj in compute:
-            mean = compute[subj]['x'] / compute[subj]['n']
-            std = np.sqrt((compute[subj]['x2'] / compute[subj]['n']) - mean**2)
-            self.subj_mvn_params[subj]['mean'] = mean
-            self.subj_mvn_params[subj]['std'] = std
+        self.n_eeg_seqs = len(self.seqs)
+        self.n_aud_seqs = len(self.stimuli)
+        self.n_subj = len(list(set(self.subjects)))
+        self.n_speaker = len(list(set(self.speakers)))
 
-    def apply_subj_mvn(self, feat, subj):
-        return (feat - self.subj_mvn_params[subj]["mean"]) / self.subj_mvn_params[subj]["std"]
+        print(f"Joint Dataset with {len(self.esegs)} segs, {self.n_eeg_seqs} EEG seqs and {self.n_aud_seqs} audio seqs")
+        print(f"Joint Dataset contains {self.n_subj} subjects and {self.n_speaker} stimulus.")
 
-    def apply_mvn(self, feats, feat_type='eeg'):
+    def apply_mvn(self, feats, feat_type='eeg', ds='KUL'):
         """Apply mean and variance normalization."""
         if self.mvn_params is None:
             return feats
         else:
-            return (feats - self.mvn_params[feat_type]["mean"]) / self.mvn_params[feat_type]["std"]
+            return (feats - self.mvn_params[feat_type][ds]["mean"]) / self.mvn_params[feat_type][ds]["std"]
 
     def _mvn_prep(self, mvn_path):
         if mvn_path is not None:
@@ -355,35 +132,51 @@ class Joint_AUD_EEG_Dataset(Dataset):
 
     def _compute_mvn(self, feat_type):
         """Compute mean and variance normalization."""
-        n, x, x2 = 0.0, 0.0, 0.0
-        for _, row in self.csv.iterrows():
+        print(f"Computing MVN...")
+        x, x2, n = {'SPARR':0, 'KUL':0}, {'SPARR':0, 'KUL':0}, {'SPARR':0, 'KUL':0}
+        for _, row in tqdm(self.csv.iterrows(), total=len(self.csv)):
             if feat_type == 'eeg':
                 feat_col_name = 'eeg_path'
             else:
                 feat_col_name = 'sti_feature_path'
             feat_path = row[feat_col_name].replace('ROOT', self.root)
             with open(feat_path, "rb") as f:
-                feat = np.load(f)
-            x += np.sum(feat, axis=1, keepdims=True)
-            x2 += np.sum(feat ** 2, axis=1, keepdims=True)
-            n += feat.shape[1]
-        mean = x / n
-        std = np.sqrt(x2 / n - mean ** 2)
-        return {"mean": mean.tolist(), "std": std.tolist()}
+                feat = np.load(f, allow_pickle=True)
+            if feat_type == 'eeg':
+                if feat.shape[-1] == 64:
+                    feat = feat.T
+                x[row['dataset']] += np.sum(feat, axis=1, keepdims=True)
+                x2[row['dataset']] += np.sum(feat ** 2, axis=1, keepdims=True)
+                n[row['dataset']] += feat.shape[1]
+            else:
+                if feat.shape[-1] == 201:
+                    feat = feat.T
+                x[row['dataset']] += np.sum(feat, axis=1, keepdims=True)
+                x2[row['dataset']] += np.sum(feat ** 2, axis=1, keepdims=True)
+                n[row['dataset']] += feat.shape[1]
+                
+        mvn_params = {'SPARR':0, 'KUL':0}
+        for ds in mvn_params:
+            mean = x[ds] / n[ds]
+            std = np.sqrt((x2[ds] / n[ds]) - mean ** 2)
+            print(f"{ds} mean:{mean.shape, mean.mean()}, std:{std.shape, std.mean()}")
+            mvn_params[ds] = {"mean": mean.tolist(), "std": std.tolist()}
+        return mvn_params
 
-    def undo_mvn(self, feats, feat_type='eeg'):
+    def undo_mvn(self, feats, feat_type='eeg', ds='KUL'):
         """Undo mean and variance normalization."""
         if self.mvn_params is None:
             return feats
         else:
-            return feats * self.mvn_params[feat_type]["std"] + self.mvn_params[feat_type]["mean"]
+            return feats * self.mvn_params[feat_type][ds]["std"] + self.mvn_params[feat_type][ds]["mean"]
 
     def _make_segs(
         self,
         seqs: list,
         lens: list,
-        seg_len: int = 20,
-        seg_shift: int = 8,
+        sr_list: list,
+        seg_len: float = 0.5,
+        seg_shift: float = 0.1,
         rand_seg: bool = False,
     ):
         """Make segments from a list of sequences.
@@ -391,32 +184,39 @@ class Joint_AUD_EEG_Dataset(Dataset):
         Args:
             seqs:      List of sequences
             lens:      List of sequence lengths
-            seg_len:   Segment length
-            seg_shift: Segment shift if rand_seg is False; otherwise randomly
-                           extract floor(seq_len/seg_shift) segments per sequence
+            seg_len:   Segment length in secs
+            seg_shift: Segment shift if rand_seg is False; otherwise randomly 
+                           extract floor(seq_len/seg_shift) segments per sequence (secs)
             rand_seg:  If True, randomly extract segments
         """
         eeg_segs = []
         aud_segs = []
         nsegs = []
-        for seq, l in zip(seqs, lens):
-            nseg = (l - seg_len) // seg_shift + 1
+        
+        for i, (seq, l) in enumerate(zip(seqs, lens)):
+            eeg_sr = sr_list[i]
+      
+            # change secs -> samples
+            seg_len_samples = int(seg_len * eeg_sr)
+            seg_shift_samples = int(seg_shift * eeg_sr)
+            
+            nseg = (l - seg_len_samples) // seg_shift_samples + 1
             nsegs.append(nseg)
+            
             if rand_seg:
-                starts = np.random.choice(range(l - seg_len + 1), rand_seg)
+                starts = np.random.choice(range(l - seg_len_samples + 1), rand_seg)
             else:
-                starts = np.arange(nseg) * seg_shift
+                starts = np.arange(nseg) * seg_shift_samples
+            
             for eeg_start in starts:
-                eeg_end = eeg_start + seg_len
-                
-                st_dur = eeg_start / self.eeg_sr
-                en_dur = eeg_end / self.eeg_sr
+                eeg_end = eeg_start + seg_len_samples
 
-                aud_start = int(st_dur * self.aud_fr)
-                aud_end = int(en_dur * self.aud_fr)
+                # change samples -> secs
+                st_dur = eeg_start / eeg_sr
+                en_dur = eeg_end / eeg_sr
 
-                eeg_segs.append(Segment(seq, eeg_start, eeg_end))
-                aud_segs.append(Segment(seq, aud_start, aud_end))
+                eeg_segs.append(Segment(seq, st_dur, en_dur))
+                aud_segs.append(Segment(seq, st_dur, en_dur))
         return eeg_segs, aud_segs, nsegs
     
     def __len__(self, ):  
@@ -431,204 +231,115 @@ class Joint_AUD_EEG_Dataset(Dataset):
             # Lookup eeg, spec segments and apply mvn
             eseg = self.esegs[index]
             aseg = self.asegs[index]
-            idx = self.seq2idx[eseg.seq]
-            subj = eseg.seq.split('_')[0]
-            eeg_path = self.eeg_paths[idx].replace('ROOT', self.root)
+            
+            e_idx = self.eeg_seq2idx[eseg.seq]
+            sti = self.csv['stimuli'][e_idx]
+            ds = self.csv['dataset'][e_idx]
+            a_idx = self.aud_seq2idx[sti] 
+            
+            #subj = eseg.seq.split('_')[0]
+            eeg_path = self.eeg_paths[e_idx].replace('ROOT', self.root)
             with open(eeg_path, "rb") as f:
-                efeat = np.load(f)[:, eseg.start : eseg.end]
-            sti_path = self.spec_paths[idx].replace('ROOT', self.root)
-            sfeat = self.specs[sti_path][:, aseg.start : aseg.end]
-            if self.subj_norm:
-                efeat = self.apply_subj_mvn(efeat, subj)
-            else:
-                efeat = self.apply_mvn(efeat, feat_type='eeg')
-            sfeat = self.apply_mvn(sfeat, feat_type='spec')
+                efeat = np.load(f)
+                if efeat.shape[-1] == 64:
+                    efeat = efeat.T
+                # If EEG is at 64Hz upsample it to 128Hz
+                eeg_start = int(eseg.start * self.eeg_sr_list[e_idx])
+                eeg_end = int(eseg.end * self.eeg_sr_list[e_idx])
+                efeat = efeat[:, eeg_start : eeg_end]
+                if self.eeg_sr_list[e_idx] == 64:
+                    efeat = scipy.signal.resample_poly(efeat, up=2, down=1, axis=-1)
+                    
+            sti_f_path = self.csv['sti_feature_path'][e_idx]
+            sti_f_path = sti_f_path.replace('ROOT', self.root)
+            aud_start = int(aseg.start * self.aud_fr)
+            aud_end = int(aseg.end * self.aud_fr)
+            sfeat = self.specs[sti_f_path][:, aud_start : aud_end]
+            # with open(sti_f_path, "rb") as f:
+            #     sfeat = np.load(f)
+            #     if sfeat.shape[-1] == 201:
+            #         sfeat = sfeat.T
+            #     aud_start = int(aseg.start * self.aud_fr)
+            #     aud_end = int(aseg.end * self.aud_fr)
+            #     sfeat = sfeat[:, aud_start : aud_end]
+
+            efeat = self.apply_mvn(efeat, feat_type='eeg', ds=ds)
+            sfeat = self.apply_mvn(sfeat, feat_type='spec', ds=ds)
             
             # Get speaker labels
-            for k in self.spk_map:
-                if k in eseg.seq:
-                    spk = self.spk_map[k]
-                    s_label = self.spk2idx[spk]
-                    break
+            spk = self.speakers[e_idx]
+            spk_label = self.spk2idx[spk]
+            spk_nsegs = self.spk_nsegs[spk_label]
 
-            nsegs = self.seq_nsegs[idx]
+            # Get subject labels
+            sub = self.subjects[e_idx]
+            sub_label = self.sub2idx[sub]
+            sub_nsegs = self.sub_nsegs[sub_label]
+            
+            nsegs = self.seq_nsegs[e_idx]
+            a_nsegs = self.aud_nsegs[a_idx]
             efeat, sfeat = efeat.T, sfeat.T
+            
         else:
             seq = self.seqs[index]
+            sti = self.csv['stimuli'][index]
+            ds = self.csv['dataset'][index]
+            a_idx = self.aud_seq2idx[sti] 
+           
             esegs = [seg for seg in self.esegs if seg.seq == seq]
             asegs = [seg for seg in self.asegs if seg.seq == seq]
-            subj = seq.split('_')[0]
+            #subj = seq.split('_')[0]
+            
             eeg_path = self.eeg_paths[index].replace('ROOT', self.root)
             with open(eeg_path, "rb") as fp:
                 efeat = np.load(fp)
-            sti_path = self.spec_paths[index].replace('ROOT', self.root)
-            sfeat = self.specs[sti_path]
-            if self.subj_norm:
-                efeat = self.apply_subj_mvn(efeat, subj)
-            else:
-                efeat = self.apply_mvn(efeat, feat_type='eeg')
-            sfeat = self.apply_mvn(sfeat, feat_type='spec')
+                if efeat.shape[-1] == 64:
+                    efeat = efeat.T
+                # If EEG is at 64Hz upsample it to 128Hz
+                if self.eeg_sr_list[index] == 64:
+                    efeat = scipy.signal.resample_poly(efeat, up=2, down=1, axis=-1)
+                    
+            sti_f_path = self.csv['sti_feature_path'][index]
+            sti_f_path = sti_f_path.replace('ROOT', self.root)
+            sfeat = self.specs[sti_f_path]
+            # with open(sti_f_path, "rb") as f:
+            #     sfeat = np.load(f)
+
+            efeat = self.apply_mvn(efeat, feat_type='eeg', ds=ds)
+            sfeat = self.apply_mvn(sfeat, feat_type='spec', ds=ds)
 
             EFEAT, SFEAT = [], []
             for seg in esegs:
-                f_t = efeat[:, seg.start : seg.end].T
+                eeg_start = int(seg.start * self.eeg_sr)
+                eeg_end = int(seg.end * self.eeg_sr)
+                f_t = efeat[:, eeg_start : eeg_end].T
                 EFEAT.append(f_t[np.newaxis, :, :])
             for seg in asegs:
-                f_t = sfeat[:, seg.start : seg.end].T
+                aud_start = int(seg.start * self.aud_fr)
+                aud_end = int(seg.end * self.aud_fr)
+                f_t = sfeat[:, aud_start : aud_end].T
                 SFEAT.append(f_t[np.newaxis, :, :])
             efeat = np.concatenate(EFEAT, axis=0)
             sfeat = np.concatenate(SFEAT, axis=0)
 
-            # Get speaker label
-            for k in self.spk_map:
-                if k in seq:
-                    spk = self.spk_map[k]
-                    s_label = self.spk2idx[spk]
-                    break
+            # Get speaker labels
+            spk = self.speakers[index]
+            spk_label = self.spk2idx[spk]
+            spk_nsegs = self.spk_nsegs[spk_label]
 
-            s_label = np.asarray([s_label for _ in range(efeat.shape[0])])
-            idx = np.asarray([-1 for i in range(efeat.shape[0])])
+            # Get subject labels
+            sub = self.subjects[index]
+            sub_label = self.sub2idx[sub]
+            sub_nsegs = self.sub_nsegs[sub_label]
+
+            spk_label = np.asarray([spk_label for _ in range(efeat.shape[0])])
+            sub_label = np.asarray([sub_label for _ in range(efeat.shape[0])])
+            sub_nsegs = np.asarray([sub_nsegs for _ in range(efeat.shape[0])])
+            spk_nsegs = np.asarray([spk_nsegs for _ in range(efeat.shape[0])])
             nsegs = np.asarray([efeat.shape[0] for _ in range(efeat.shape[0])])
-        return idx, (efeat, sfeat), nsegs, s_label
+            e_idx = np.asarray([-1 for i in range(efeat.shape[0])])
+            nsegs = np.asarray([efeat.shape[0] for _ in range(efeat.shape[0])])
+            a_nsegs = np.asarray([self.aud_nsegs[a_idx] for _ in range(efeat.shape[0])])
+            a_idx = np.asarray([-1 for i in range(efeat.shape[0])])
 
-
-class NumpyEEGSpkDataset(NumpyEEGDataset):
-    def __init__(self, csv, min_len, mvn_path, seg_len, seg_shift, rand_seg, split):
-        super().__init__(
-            csv, min_len, mvn_path, seg_len, seg_shift, rand_seg, 'train'
-        )
-        self.spk_map = {
-            "podcast": "spk-00",
-            "audiobook_1":"spk-01",
-            "audiobook_2":"spk-02",
-            "audiobook_3":"spk-02",
-            "audiobook_4": "spk-03",
-            "audiobook_5": "spk-04",
-            "audiobook_6": "spk-04",
-            "audiobook_7": "spk-05",
-            "audiobook_8": "spk-06",
-            "audiobook_9": "spk-07",
-            "audiobook_10": "spk-08",
-            "audiobook_11": "spk-09",
-            "audiobook_12": "spk-10",
-            "audiobook_13": "spk-11",
-            "audiobook_14": "spk-12",
-        }
-
-        self.spk2idx = {}
-        for _, v in self.spk_map.items():
-            if v not in self.spk2idx:
-                curr_idx = len(self.spk2idx)
-                self.spk2idx[v] = curr_idx
-
-        self.stimuli = [Path(p).stem for p in self.csv['stimuli_path'].tolist()]
-
-    def __len__(self, ):  
-        return len(self.segs)
-
-    def __getitem__(self, index):
-        seg = self.segs[index]
-        idx = self.seq2idx[seg.seq]
-        stimuli = self.stimuli[idx].split('_')[2:]
-        if len(stimuli) > 2:
-            stimuli = "_".join(stimuli[:-1])
-        else:
-            stimuli = "_".join(stimuli)
-        if 'podcast' in stimuli:
-            stimuli = 'podcast'
-        assert stimuli in self.spk_map, f"{stimuli} not found in {self.spk_map.keys()}..."
-        spk = self.spk_map[stimuli]
-        label = self.spk2idx[spk]
-        with open(self.eeg_paths[idx], "rb") as f:
-            feat = np.load(f)[:, seg.start : seg.end]
-        feat = self.apply_mvn(feat)
-        feat = feat.T
-        return feat, label
-
-class JointEEGAudSpkDataset(Joint_AUD_EEG_Dataset):
-    def __init__(self, csv, min_len, mvn_path, seg_len, seg_shift, rand_seg, split):
-        
-        np.random.seed(777)
-
-        self.spk_map = {
-            "podcast": "spk-00",
-            "audiobook_1":"spk-01",
-            "audiobook_2":"spk-02",
-            "audiobook_3":"spk-02",
-            "audiobook_4": "spk-03",
-            "audiobook_5": "spk-04",
-            "audiobook_6": "spk-04",
-            "audiobook_7": "spk-05",
-            "audiobook_8": "spk-06",
-            "audiobook_9": "spk-07",
-            "audiobook_10": "spk-08",
-            "audiobook_11": "spk-09",
-            "audiobook_12": "spk-10",
-            "audiobook_13": "spk-11",
-            "audiobook_14": "spk-12",
-        }
-        
-        super().__init__(
-            csv, mvn_path, seg_len, seg_shift, rand_seg, 'train'
-        )
-
-        if split != 'all':
-            np.random.shuffle(self.seqs)
-            train_seqs = self.seqs[:int(len(self.seqs)*0.7)]
-            val_seqs = self.seqs[int(len(self.seqs)*0.7):int(len(self.seqs)*0.85)]
-            test_seqs = self.seqs[int(len(self.seqs)*0.85):]
-
-            if split == 'train':
-                seq_list = train_seqs
-            if split == 'val':
-                seq_list = val_seqs
-            if split == 'test':
-                seq_list = test_seqs
-        
-            self.esegs = [seg for seg in self.esegs if seg.seq in seq_list]
-            self.asegs = [seg for seg in self.esegs if seg.seq in seq_list]
-
-        print(f"Split {split} has {len(self.esegs)} seqs...")
-        
-        self.spk2idx = {}
-        self.subj2idx = {}
-        for _, v in self.spk_map.items():
-            if v not in self.spk2idx:
-                curr_idx = len(self.spk2idx)
-                self.spk2idx[v] = curr_idx
-        
-        for _, row in self.csv.iterrows():
-            subj = row['subj']
-            if subj not in self.subj2idx:
-                curr_idx = len(self.subj2idx)
-                self.subj2idx[subj] = curr_idx
-
-        self.stimuli = [Path(p).stem for p in self.csv['stimuli_path'].tolist()]
-
-    def __len__(self, ):  
-        return len(self.esegs)
-
-    def __getitem__(self, index):
-        eseg = self.esegs[index]
-        aseg = self.asegs[index]
-        idx = self.seq2idx[eseg.seq]
-        subj = eseg.seq.split('_')[0]
-        with open(self.eeg_paths[idx], "rb") as f:
-            efeat = np.load(f)[:, eseg.start : eseg.end]
-        stimuli = self.stimuli[idx].split('_')[2:]
-        if len(stimuli) > 2:
-            stimuli = "_".join(stimuli[:-1])
-        else:
-            stimuli = "_".join(stimuli)
-        if 'podcast' in stimuli:
-            stimuli = 'podcast'
-        assert stimuli in self.spk_map, f"{stimuli} not found in {self.spk_map.keys()}..."
-        spk = self.spk_map[stimuli]
-        label = self.spk2idx[spk]
-        subj_label = self.subj2idx[subj]
-        sti_path = self.spec_paths[idx] 
-        sfeat = self.specs[sti_path][:, aseg.start : aseg.end]
-        efeat = self.apply_mvn(efeat, feat_type='eeg')
-        sfeat = self.apply_mvn(sfeat, feat_type='spec')
-        efeat, sfeat = efeat.T, sfeat.T
-        return (efeat, sfeat), label, subj_label
+        return e_idx, a_idx, efeat, sfeat, nsegs, a_nsegs, spk_nsegs, sub_nsegs, spk_label, sub_label

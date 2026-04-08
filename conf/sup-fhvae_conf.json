@@ -1,0 +1,45 @@
+{
+    "seed": 777,
+    "task": "eeg",
+    "experiment": "FHVAE",
+    "run_name": "fhvae_transformer_KUL_nlayer2_dec_TRANS_mode2_spkcls_1s-segs",
+    "model_type": "FHVAE",
+    "data_args":{
+        "root_dir": "/fs/scratch/PAS2301/kumar1109",
+        "csv": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/Datasets/combined-KUL-SPARR_root.csv",
+        "seg_len": 1.0,
+        "seg_shift": 0.5,
+        "mvn_path": "/users/PAS2301/kumar1109/PyTorch-ScalableFHVAE/misc/KUL_Sparr_combined_joint_mvn.json",
+        "rand_seg": false,
+        "ds": "KUL"
+    },
+    "training_args":{
+        "epochs":1000,
+        "batch_size":256,
+        "accum_grad":1,
+        "patience":500,
+        "steps_per_epoch":-1, 
+        "alpha_dis": 10.0,
+        "beta_dis": 0.8
+    },
+    "optimizer_args":{
+        "lr":0.001,
+        "betas":[0.95, 0.999],
+        "weight_decay":0.0001
+    },
+    "model_args":{
+        "input_size":64,
+        "z1_dim":16,
+        "z2_dim":16,
+        "z1_hus":256,
+        "z2_hus":256,
+        "x_hus":256,
+        "n_layers":2,
+        "seq_len":128,
+        "nhead": 4,
+        "encoder_type": "Transformer",
+        "decoder_type": "Transformer",
+        "norm_first": false
+    }
+    
+}

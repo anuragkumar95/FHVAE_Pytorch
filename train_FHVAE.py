@@ -5,14 +5,11 @@ import json
 import random
 from tqdm import tqdm
 import torch
-from pathlib import Path
-from models.fhvae import FHVAE, FHVAEwithSpkID
+from models.fhvae import FHVAE
 from torch.optim import Adam
 import numpy as np
-from Datasets.datasets_eeg import NumpyEEGDataset
-from Datasets.datasets import NumpyDataset
+from Datasets.datasets_eeg import Joint_AUD_EEG_Dataset
 from utils import (
-    save_checkpoint,
     check_best,
 )
 import wandb
@@ -20,7 +17,6 @@ import wandb
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-import contextlib
 import torch.multiprocessing as mp
 
 def set_seed(seed, rank):
@@ -80,34 +76,14 @@ class Trainer:
 
         # Prepare datasets
         if config['task'] == 'eeg':
-            self.train_ds = NumpyEEGDataset(
+            self.train_ds = Joint_AUD_EEG_Dataset(
                 **config['data_args'], split='train'
             )
-            self.val_ds = NumpyEEGDataset(
+            self.val_ds = Joint_AUD_EEG_Dataset(
                 **config['data_args'], split='val'
             )
-            self.test_ds = NumpyEEGDataset(
+            self.test_ds = Joint_AUD_EEG_Dataset(
                 **config['data_args'], split='test'
-            )
-        if config['task'] == 'timit':
-            ds_dir = config['dataset_dir']
-            self.train_ds = NumpyDataset(
-                **config['data_args'], 
-                feat_scp=f"{ds_dir}/train/feats.scp",
-                len_scp=f"{ds_dir}/train/len.scp",
-                split='train'
-            )
-            self.val_ds = NumpyDataset(
-                **config['data_args'],
-                feat_scp=f"{ds_dir}/dev/feats.scp",
-                len_scp=f"{ds_dir}/dev/len.scp",
-                split='val'
-            )
-            self.test_ds = NumpyDataset(
-                **config['data_args'], 
-                feat_scp=f"{ds_dir}/test/feats.scp",
-                len_scp=f"{ds_dir}/test/len.scp",
-                split='test'
             )
 
         self.train_sampler = None
@@ -144,18 +120,10 @@ class Trainer:
         )
 
         # Config model, optimizer
-        self.model_type = config.get('model_type', None)
-        if self.model_type == 'FHVAE+spkID':
-            self.model = FHVAEwithSpkID(
-                **config['model_args'], 
-                n_seqs=self.train_ds.n_seqs
-            ).to(self.device).double()
-            #raise NotImplementedError("ThreeVarFHVAE is not implemented yet")
-        else:
-            self.model = FHVAE(
-                **config['model_args'], 
-                n_seqs=self.train_ds.n_seqs
-            ).to(self.device).double()
+        self.model = FHVAE(
+            **config['model_args'],
+            n_seqs=self.train_ds.n_eeg_seqs
+        ).to(self.device).double()
 
         if parallel and rank is not None:
             self.model = DDP(
@@ -168,11 +136,14 @@ class Trainer:
         )
 
         if args.resume_pt is not None:
+            print(f"Checkpoint loading from {args.resume_pt}")
             self.load_checkpoint(args.resume_pt, map_location=self.device)
 
         self.accum_grad = self.config['training_args']['accum_grad']
 
         print(f"MODEL:\n{self.model}")
+        total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total Trainable Parameters: {total_trainable_params:,}")
 
         # Logging
         if self.rank == 0:
@@ -180,8 +151,8 @@ class Trainer:
             print("Valid dataloader length:", len(self.val_loader))
             print("Test dataloader length:", len(self.test_loader))
             wandb.login()
-            wandb.init(project='FHVAE', name=config['run_name'])
-            self.exp_dir = f"./experiments/{config['run_name']}_{args.suf}"
+            wandb.init(project='FHVAE-KUL', name=config['run_name'])
+            self.exp_dir = f"./experiments/fhvae/{config['run_name']}_{args.suf}"
             os.makedirs(self.exp_dir, exist_ok=True)
 
     def save_checkpoint(self, **kwargs):
@@ -195,22 +166,22 @@ class Trainer:
         }
         save_path = os.path.join(self.exp_dir, f"best_checkpoint_best_{kwargs.get('save_metric', 'model')}.pt")
         torch.save(save_dict, save_path)
-        self.config['model_args']['n_seqs'] = self.train_ds.n_seqs
+        self.config['model_args']['n_seqs'] = self.train_ds.n_eeg_seqs
+        self.config['model_args']['n_stimuli'] = self.train_ds.n_aud_seqs
+        self.config['model_args']['n_speakers'] = self.train_ds.n_speaker
+        self.config['model_args']['n_subjects'] = self.train_ds.n_subj
         with open(f"{self.exp_dir}/config.json", 'w') as f:
             json.dump(self.config, f)
         print(f"Checkpoint saved at {save_path}")
 
     def load_checkpoint(self, checkpoint_path, map_location='cpu'):
         ckpt_dir = "/".join(checkpoint_path.split('/')[:-1])
-
         with open(f"{ckpt_dir}/config.json", 'r') as f:
             self.config = json.load(f)
-
         checkpoint = torch.load(checkpoint_path, map_location=map_location)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.start_epoch = checkpoint.get('epoch', 0) + 1
-        
         print(f"Loaded checkpoint from {checkpoint_path}, starting at epoch {self.start_epoch}")
 
     def reduce_tensor(self, tensor, world_size):
@@ -226,6 +197,7 @@ class Trainer:
         best_val_likelihood = -np.inf
 
         self.model.double()
+
         for epoch in range(self.start_epoch, self.epochs):
             # training
             if self.train_sampler is not None:
@@ -233,8 +205,11 @@ class Trainer:
             self.model.train()
             train_loss = 0.0
 
-            pbar = tqdm(range(min(self.config['training_args']['steps_per_epoch'], len(self.train_loader)//self.accum_grad)))   
-            
+            epoch_steps = self.config['training_args']['steps_per_epoch']
+            if epoch_steps == -1:
+                epoch_steps = len(self.train_loader) // self.accum_grad
+            pbar = tqdm(range(min(epoch_steps, len(self.train_loader)//self.accum_grad)))  
+          
             iterator = iter(self.train_loader)
             for batch_idx in pbar:
                 batch_lb = 0.0
@@ -244,45 +219,36 @@ class Trainer:
                 batch_neg_kld_z1 = 0.0
                 batch_neg_kld_z2 = 0.0
                 batch_log_pmu2 = 0.0
-                
                 batch_mse = 0.0
                 self.optimizer.zero_grad()
                 for _ in range(self.accum_grad):
                     try:
-                        (idxs, features, nsegs) = next(iterator)
+                        (e_idx, _, efeat, _, nsegs, _, _, _, _, _) = next(iterator)
                     except StopIteration:
                         iterator = iter(self.train_loader)
-                        (idxs, features, nsegs) = next(iterator)
-
-                    features = features.to(self.device)
-                    idxs = idxs.to(self.device)
+                        (e_idx, _, efeat, _, nsegs, _, _, _, _, _) = next(iterator)
+                    
+                    features = efeat.to(self.device)
+                    idxs = e_idx.to(self.device)
                     nsegs = nsegs.to(self.device)
-
-                    if self.model_type != 'FHVAE+spkID':
-                        lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
-                            x=features, mu_idx=idxs, num_seqs=self.train_ds.n_seqs, num_segs=nsegs
-                        )
-                    else:
-                        (lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred), spk_outputs = self.model(
-                            x=features, mu_idx=idxs, num_seqs=self.train_ds.n_seqs, num_segs=nsegs
-                        )
+                  
+                    lower_bound, discrim_loss, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
+                        x=features, mu_idx=idxs, num_segs=nsegs
+                    )
                     loss = loss_function(lower_bound, discrim_loss, self.config['training_args']['alpha_dis']) / self.accum_grad
-                    mse = ((x_pred - features)**2).mean().item()
+                        
                     loss.backward()
-                
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+
+                    mse = ((x_pred - features)**2).mean().item()
                     batch_lb += lower_bound.mean().item() / self.accum_grad
-                    batch_disc_loss += discrim_loss.mean().item() / self.accum_grad
                     batch_log_px_z += log_px_z.mean().item() / self.accum_grad
                     batch_neg_kld_z1 += neg_kld_z1.mean().item() / self.accum_grad
                     batch_neg_kld_z2 += neg_kld_z2.mean().item() / self.accum_grad
                     batch_log_pmu2 += log_pmu2.mean().item() / self.accum_grad
+                    batch_disc_loss += discrim_loss.mean().item() / self.accum_grad
                     batch_mse += mse / self.accum_grad
                     batch_loss += loss.item() / self.accum_grad
-
-                    if self.model_type == 'ThreeVar':
-                        batch_disc_loss3 += discrim_loss3.mean().item() / self.accum_grad
-                        batch_log_pmu3 += log_pmu3.mean().item() / self.accum_grad
-                        batch_neg_kld_z3 += neg_kld_z3.mean().item() / self.accum_grad
 
                 self.optimizer.step()
                 train_loss += batch_loss
@@ -293,18 +259,15 @@ class Trainer:
 
                 if self.rank == 0:
                     wandb.log({
-                        "Loss": batch_loss / features.shape[1],
-                        "MSE": mse,
-                        "LowerBound": batch_lb / features.shape[1],
-                        "Discrim_Loss": -batch_disc_loss / features.shape[1],
-                        "Discrim_Loss3": -batch_disc_loss3 / features.shape[1],
-                        "Step": epoch * len(self.train_loader) + (batch_idx + 1),
-                        "Likelihood P(x|z)": batch_log_px_z / features.shape[1],
-                        "KL_z1": (-batch_neg_kld_z1) / features.shape[1],
-                        "KL_z2": (-batch_neg_kld_z2) / features.shape[1],
-                        "KL_z3": (-batch_neg_kld_z3) / features.shape[1],
-                        "Log p(mu2)": batch_log_pmu2 / features.shape[1],
-                        "Log p(mu3)": batch_log_pmu3 / features.shape[1],
+                        "train/Loss": batch_loss / features.shape[1],
+                        "train/MSE": mse,
+                        "train/LowerBound": batch_lb / features.shape[1],
+                        "train/Discrim_Loss": -batch_disc_loss / features.shape[1],
+                        "Step": epoch * self.config['training_args']['steps_per_epoch'] + (batch_idx + 1),
+                        "train/Likelihood P(x|z)": batch_log_px_z / features.shape[1],
+                        "train/KL_z1": (-batch_neg_kld_z1) / features.shape[1],
+                        "train/KL_z2": (-batch_neg_kld_z2) / features.shape[1],
+                        "train/Log p(mu2)": batch_log_pmu2 / features.shape[1],
                     })
 
             train_loss /= len(self.train_loader)
@@ -319,40 +282,34 @@ class Trainer:
             VAL_KLD_Z2 = 0
             VAL_KLD_Z3 = 0
             VAL_LOG_PMU2 = 0
-            VAL_LOG_PMU3 = 0
+
             with torch.no_grad():
                 pbar = tqdm(self.val_loader)
                 batch_idx = 1
-                for (idxs, feature, nsegs) in pbar:
+                for (e_idx, _, efeat, _, nsegs, _, _, _, _, _) in pbar:
                     
-                    feature = feature.to(self.device)
-                    idxs = idxs.to(self.device)
-                    nsegs = nsegs.to(self.device)
+                    feature = efeat.to(self.device).squeeze(0)
+                    idxs = idxs.to(self.device).squeeze(0)
+                    nsegs = nsegs.to(self.device).squeeze(0)
+                     
+                    val_BS = 64
+                    n_mini_batches = ((feature.shape[0]) // val_BS) + int((feature.shape[0]) % val_BS != 0)
+                    for i in range(n_mini_batches): 
+                        
+                        feature_batch = feature[i*val_BS:(i+1)*val_BS]
+                        idxs_batch = idxs[i*val_BS:(i+1)*val_BS]
+                        nsegs_batch = nsegs[i*val_BS:(i+1)*val_BS]
 
-                    feature = feature.squeeze(0)
-                    # if self.config['task'] == 'eeg':
-                    #     feature = feature.permute(2,0,1)
-
-                    if self.model_type != 'ThreeVar':
                         val_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
-                            feature, idxs, self.val_ds.n_seqs, nsegs, mode='val'
+                            feature_batch, idxs_batch, nsegs_batch, mode='val'
                         )
-                    else:
-                        val_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, neg_kld_z3, (log_pmu2, log_pmu3), x_pred = self.model(
-                            feature, idxs, self.val_ds.n_seqs, nsegs, mode='val'
-                        )
-                    mse = ((x_pred - feature)**2).mean().item()
-
-                    VAL_LB += val_lower_bound.mean().item()/feature.shape[1]
-                    VAL_MSE += mse
-                    VAL_PX_Z += log_px_z.mean().item()/feature.shape[1]
-                    VAL_KLD_Z1 += (-neg_kld_z1).mean().item()/feature.shape[1] 
-                    VAL_KLD_Z2 += (-neg_kld_z2).mean().item()/feature.shape[1]
-                    VAL_LOG_PMU2 += log_pmu2.mean().item()/feature.shape[1]
-
-                    if self.model_type == 'ThreeVar':
-                        VAL_KLD_Z3 += (-neg_kld_z3).mean().item()/feature.shape[1]
-                        VAL_LOG_PMU3 += log_pmu3.mean().item()/feature.shape[1]
+                    
+                        VAL_LB += val_lower_bound.mean().item()/(feature_batch.shape[1] * n_mini_batches)
+                        VAL_MSE += ((x_pred - feature_batch)**2).mean().item() / n_mini_batches
+                        VAL_PX_Z += log_px_z.mean().item()/(feature_batch.shape[1] * n_mini_batches)
+                        VAL_KLD_Z1 += (-neg_kld_z1).mean().item()/(feature_batch.shape[1] * n_mini_batches)
+                        VAL_KLD_Z2 += (-neg_kld_z2).mean().item()/(feature_batch.shape[1] * n_mini_batches)
+                        VAL_LOG_PMU2 += log_pmu2.mean().item()/(feature_batch.shape[1] * n_mini_batches)
                     
                     pbar.set_postfix({
                         "Epoch": epoch,
@@ -367,117 +324,30 @@ class Trainer:
                 self.reduce_tensor(VAL_KLD_Z1, self.world_size)
                 self.reduce_tensor(VAL_KLD_Z2, self.world_size)
                 self.reduce_tensor(VAL_LOG_PMU2, self.world_size)
-                self.reduce_tensor(VAL_LOG_PMU3, self.world_size)
-                self.reduce_tensor(VAL_KLD_Z3, self.world_size)
 
             VAL_LB /= len(self.val_loader)
             VAL_MSE /= len(self.val_loader)
             VAL_PX_Z /= len(self.val_loader)
             VAL_KLD_Z1 /= len(self.val_loader)
             VAL_KLD_Z2 /= len(self.val_loader)
-            VAL_LOG_PMU2 /= len(self.val_loader)
             VAL_KLD_Z3 /= len(self.val_loader)
-            VAL_LOG_PMU3 /= len(self.val_loader)
+            VAL_LOG_PMU2 /= len(self.val_loader)
 
             if self.rank == 0:
                 wandb.log({
-                    "Val_MSE": VAL_MSE,
-                    "Val_LowerBound": VAL_LB,
-                    "Val_Likelihood P(x|z)": VAL_PX_Z,
-                    "Val_KL_z1": VAL_KLD_Z1,
-                    "Val_KL_z2": VAL_KLD_Z2,
-                    "Val_KL_z3": VAL_KLD_Z3,
-                    "Val_Log p(mu2)": VAL_LOG_PMU2,
-                    "Val_Log p(mu3)": VAL_LOG_PMU3,
+                    "val/MSE": VAL_MSE,
+                    "val/LowerBound": VAL_LB,
+                    "val/Likelihood P(x|z)": VAL_PX_Z,
+                    "val/KL_z1": VAL_KLD_Z1,
+                    "val/KL_z2": VAL_KLD_Z2,
+                    "val/KL_z3": VAL_KLD_Z3,
+                    "val/Log p(mu2)": VAL_LOG_PMU2,
                     "Epoch": epoch
                 })
 
                 print(f"====> Validation set lb: {VAL_LB:.4f}")
 
-            # Test
-            TEST_LB = 0
-            TEST_MSE = 0
-            TEST_PX_Z = 0
-            TEST_KLD_Z1 = 0
-            TEST_KLD_Z2 = 0
-            TEST_LOG_PMU2 = 0
-            TEST_KLD_Z3 = 0
-            TEST_LOG_PMU3 = 0
-            with torch.no_grad():
-                pbar = tqdm(self.test_loader)
-                batch_idx = 1
-                for (idxs, feature, nsegs) in pbar:
-
-                    feature = feature.to(self.device)
-                    idxs = idxs.to(self.device)
-                    nsegs = nsegs.to(self.device)
-
-                    feature = feature.squeeze(0)
-                    # if self.config['task'] == 'eeg':
-                    #     feature = feature.permute(2,0,1)
-
-                    if self.model_type != 'ThreeVar':
-                        test_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, log_pmu2, x_pred = self.model(
-                            feature, idxs, self.test_ds.n_seqs, nsegs, mode='test'
-                        )
-                    else:
-                        test_lower_bound, _, log_px_z, neg_kld_z1, neg_kld_z2, neg_kld_z3, (log_pmu2, log_pmu3), x_pred = self.model(
-                            feature, idxs, self.test_ds.n_seqs, nsegs, mode='test'
-                        )
-                    
-                    mse = ((x_pred - feature)**2).mean().item()
-
-                    TEST_LB += test_lower_bound.mean().item()/feature.shape[1]
-                    TEST_MSE += mse
-                    TEST_PX_Z += log_px_z.mean().item()/feature.shape[1]
-                    TEST_KLD_Z1 += (-neg_kld_z1).mean().item()/feature.shape[1] 
-                    TEST_KLD_Z2 += (-neg_kld_z2).mean().item()/feature.shape[1]
-                    TEST_LOG_PMU2 += log_pmu2.mean().item()/feature.shape[1]
-
-                    if self.model_type == 'ThreeVar':
-                        TEST_KLD_Z3 += (-neg_kld_z3).mean().item()/feature.shape[1]
-                        TEST_LOG_PMU3 += log_pmu3.mean().item()/feature.shape[1]
-                    
-                    pbar.set_postfix({
-                        "Epoch": epoch,
-                        "Test_LB": TEST_LB / ((batch_idx+1) * feature.shape[1]) 
-                    })
-                    batch_idx += 1
-
-            if self.parallel:
-                self.reduce_tensor(TEST_LB, self.world_size)
-                self.reduce_tensor(TEST_MSE, self.world_size)
-                self.reduce_tensor(TEST_PX_Z, self.world_size)
-                self.reduce_tensor(TEST_KLD_Z1, self.world_size)
-                self.reduce_tensor(TEST_KLD_Z2, self.world_size)
-                self.reduce_tensor(TEST_LOG_PMU2, self.world_size)
-                self.reduce_tensor(TEST_KLD_Z3, self.world_size)
-                self.reduce_tensor(TEST_LOG_PMU3, self.world_size)
-
-            TEST_LB /= len(self.test_loader)
-            TEST_MSE /= len(self.test_loader)
-            TEST_PX_Z /= len(self.test_loader)
-            TEST_KLD_Z1 /= len(self.test_loader)
-            TEST_KLD_Z2 /= len(self.test_loader)
-            TEST_LOG_PMU2 /= len(self.test_loader)
-            TEST_KLD_Z3 /= len(self.test_loader)
-            TEST_LOG_PMU3 /= len(self.test_loader)
-
-            if self.rank == 0:
-                wandb.log({
-                    "Test_MSE": TEST_MSE,
-                    "Test_LowerBound": TEST_LB,
-                    "Test_Likelihood P(x|z)": TEST_PX_Z,
-                    "Test_KL_z1": TEST_KLD_Z1,
-                    "Test_KL_z2": TEST_KLD_Z2,
-                    "Test_Log p(mu2)": TEST_LOG_PMU2,
-                    "Test_KL_z3": TEST_KLD_Z3,
-                    "Test_Log p(mu3)": TEST_LOG_PMU3,
-                    "Epoch": epoch
-                })
-
-                print(f"====> Test set lb: {TEST_LB:.4f}")
-
+                # Save checkpoint with best reconstruction
                 if check_best(VAL_PX_Z, best_val_likelihood):
                     best_epoch = epoch
                     best_val_likelihood = VAL_PX_Z
@@ -487,6 +357,7 @@ class Trainer:
                         save_metric='val_likelihood',
                     )
 
+                # Save checkpoint with best lowerbound
                 if check_best(VAL_LB, best_val_lb):
                     best_epoch = epoch
                     best_val_lb = VAL_LB
@@ -496,8 +367,15 @@ class Trainer:
                         save_metric='val_lower_bound',
                     )
 
+                # Save the latest checkpoint
+                self.save_checkpoint(
+                    epoch=epoch,
+                    val_lower_bound=VAL_LB,
+                    save_metric='latest',
+                )
+
                 if check_terminate(epoch, best_epoch, self.config['training_args']['patience'], self.config['training_args']['epochs']):
-                    print("Training terminated!")
+                    print(f"Training terminated after observing no improvement in {self.config['training_args']['patience']} epochs.")
                     break
    
         print("Training complete!")

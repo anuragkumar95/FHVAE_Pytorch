@@ -11,18 +11,10 @@ from models.layers import (
     LatentSegEncoder,
     LatentSeqEncoder,
     LSTMDecoder,
-    JointLatentSeqEncoder,
-    JointLatentSeqEncoder2,
     TransformerSegEncoder,
-    TransformerSeqEncoder
+    TransformerSeqEncoder,
+    TransformerDecoder,
 )
-
-from models.spk_classifier import SpeakerClassifier
-from models.losses import (
-    InfoNCELoss, 
-)
-
-
 
 class FHVAE(nn.Module):
     def __init__(
@@ -35,7 +27,11 @@ class FHVAE(nn.Module):
         z2_dim=16,
         x_hus=128,
         n_layers=1,
+        seq_len=320,
+        nhead=4,
         encoder_type='LSTM',
+        decoder_type='LSTM',
+        norm_first=False,
     ):
         super().__init__()
         self.model = "fhvae"
@@ -67,29 +63,51 @@ class FHVAE(nn.Module):
                 hus=self.z2_hus, 
                 n_LSTM_layers=n_layers
             )
+            
         elif encoder_type == 'Transformer':
+
             self.z1_encoder = TransformerSegEncoder(
                 input_size=input_size+self.z1_dim, 
                 output_size=self.z1_dim,
                 hus=self.z1_hus, 
-                n_layers=n_layers
+                nhead=nhead,
+                n_layers=n_layers,
+                norm_first=norm_first,
+                pool=False
             )
             self.z2_encoder = TransformerSeqEncoder(
                 input_size=input_size, 
                 output_size=self.z2_dim,
                 hus=self.z2_hus, 
-                n_layers=n_layers
+                nhead=nhead,
+                n_layers=n_layers,
+                norm_first=norm_first,
+                pool=True
             )
+
         else:
             raise ValueError(f"Encoder type {encoder_type} not supported. Use 'LSTM' or 'Transformer'.")
         
-        self.decoder = LSTMDecoder(
-            input_size=self.z1_dim+self.z2_dim, 
-            output_size=input_size,
-            hus=self.x_hus, 
-            n_LSTM_layers=n_layers
-        )
+        if decoder_type == 'LSTM':
+            self.decoder = LSTMDecoder(
+                input_size=self.z1_dim+self.z2_dim, 
+                output_size=input_size,
+                hus=self.x_hus, 
+                n_LSTM_layers=n_layers
+            )
+
+        elif decoder_type == 'Transformer':
+            self.decoder = TransformerDecoder(
+                latent_dim=self.z2_dim, 
+                output_channels=input_size, 
+                seq_len=seq_len, 
+                d_model=self.x_hus, 
+                nhead=nhead, 
+                n_layers=n_layers,
+            )
+
         self.loss = nn.CrossEntropyLoss()
+        self.decoder_type = decoder_type
 
     def log_gauss(self, x, mu=0.0, logvar=0.0):
         """Compute log N(x; mu, exp(logvar))"""
@@ -141,14 +159,13 @@ class FHVAE(nn.Module):
         return mu2
 
     def forward(
-        self, x: torch.Tensor, mu_idx: torch.Tensor, num_seqs: int, num_segs: int, mode: str = 'train'
+        self, x: torch.Tensor, mu_idx: torch.Tensor, num_segs: int, mode: str = 'train'
     ):
         """Forward pass through the network
 
         Args:
             x:        Input data
             mu_idx:   Int tensor of shape (bs,). Index for mu2_table
-            num_seqs: Size of mu2 lookup table
             num_segs: Number of audio segments
 
         Returns:
@@ -188,19 +205,29 @@ class FHVAE(nn.Module):
         # variational lower bound
         log_pmu2 = torch.sum(
             self.log_gauss(mu2, self.pmu2[0], self.pmu2[1]), dim=1
-        )
+        ).reshape(-1, 1)
 
         neg_kld_z2 = -1 * torch.sum(
             self.kld(qz2_x[0], qz2_x[1], pz2[0], pz2[1]), dim=1
-        )
-        neg_kld_z1 = -1 * torch.sum(
-            self.kld(qz1_x[0], qz1_x[1], self.pz1[0], self.pz1[1]), dim=1
-        )
+        ).reshape(-1, 1)
+        
+        if self.decoder_type == 'Transformer':
+            #Sum across feature_dim, [B, seq_len] when Transformer decoder
+            neg_kld_z1 = -1 * torch.sum(
+                self.kld(qz1_x[0], qz1_x[1], self.pz1[0], self.pz1[1]), dim=(1,2) 
+            ).reshape(-1, 1)
+
+        elif self.decoder_type == 'LSTM':
+            neg_kld_z1 = -1 * torch.sum(
+                self.kld(qz1_x[0], qz1_x[1], self.pz1[0], self.pz1[1]), dim=1 
+            ).reshape(-1, 1)
+
         log_px_z = torch.sum(
             self.log_gauss(x, px_z[0], px_z[1]), dim=(1,2)
-        )
+        ).reshape(-1, 1)
         
-        num_segs = num_segs.to(x.device)
+        num_segs = num_segs.to(x.device).reshape(-1, 1)
+
         lower_bound = log_px_z + neg_kld_z1 + neg_kld_z2 + (log_pmu2 / num_segs)
         
         log_qy = -1
@@ -223,75 +250,3 @@ class FHVAE(nn.Module):
         z1 = latents['z1']['mu']
         z2 = latents['z2']['mu']
         return self.reconstruct_latents(z1, z2, x.shape[1])
-    
-
-class FHVAEwithSpkID(FHVAE):
-    def __init__(
-        self,
-        input_size,
-        n_seqs, 
-        z1_hus=128,
-        z2_hus=128,
-        z1_dim=16,
-        z2_dim=16,
-        x_hus=128,
-        n_layers=1,
-        encoder_type='LSTM',
-        n_speakers=13, 
-        loss='nce'
-    ):
-        super().__init__(input_size, n_seqs, z1_hus, z2_hus, z1_dim, z2_dim, x_hus, n_layers, encoder_type)
-
-        self.loss_type = loss
-        self.sim_loss = InfoNCELoss()
-        self.spk_classification_head = SpeakerClassifier(
-            input_size=z2_dim,
-            num_speakers=n_speakers,
-            hus = 512
-        )
-
-    def accuracy(self, logits, labels):
-        _, preds = torch.max(logits, 1)
-        correct = (preds == labels).sum()
-        return correct / labels.size(0)
-    
-    def _kld(self, p_mu, p_logvar, q_mu, q_logvar):
-        """Compute D_KL(p || q) of two Gaussians"""
-        return -0.5 * (
-            1
-            + p_logvar
-            - q_logvar
-            - (torch.pow(p_mu - q_mu, 2) + torch.exp(p_logvar)) / torch.exp(q_logvar)
-        )
-
-    def forward(
-            self, x: torch.Tensor, mu_idx: torch.Tensor, num_seqs: int, num_segs: int, s_labels: torch.Tensor, mode: str = 'train'
-        ):
-
-        outputs = super().forward(x=x, mu_idx=mu_idx, num_seqs=num_seqs, num_segs=num_segs, mode=mode)
-        
-
-        ############################# MUTUAL INFO (InfoNCE) ############################
-        
-        _, _, z2_sample = self.z2_encoder(x)
-        _, _, z1_sample = self.z1_encoder(x, z2_sample)
-
-        # info_nce where we match same spk embeddings and move the same diff spk embeddings away
-        z1_z2 = torch.cat([z1_sample, z2_sample], dim=-1)
-        nce_loss_spk = self.sim_loss(z1_z2, z1_z2, labels=s_labels) 
-        
-        ######################### SPK CLASSIFICATION ##########################
-
-        logits = self.spk_classification_head(z1_z2.detach())
-        ce_loss = self.loss(logits, s_labels)
-        acc = self.accuracy(logits, s_labels)
-        spk_outputs = {
-            'spk_ce_loss': ce_loss,
-            'acc': acc, 
-            'spk_infonce_loss': nce_loss_spk
-        }
-
-        return outputs, spk_outputs
-
-    
-
