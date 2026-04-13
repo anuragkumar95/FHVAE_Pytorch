@@ -21,3 +21,5 @@ To run training,
 ```
 python train_FHVAE.py --conf ./conf/sup-fhvae_conf.json
 ```
+Inline-style: 
+![alt text](clusters.pdf "Logo Title Text 1")
