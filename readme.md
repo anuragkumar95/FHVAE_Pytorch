@@ -21,4 +21,5 @@ To run training,
 ```
 python train_FHVAE.py --conf ./conf/sup-fhvae_conf.json
 ```
-clusters.pdf
+<img width="1133" height="680" alt="cluster" src="https://github.com/user-attachments/assets/d6e6c6ba-7d41-4c4e-9227-4ac3e6e43953" />
+
