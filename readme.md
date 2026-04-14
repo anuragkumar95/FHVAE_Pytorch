@@ -14,7 +14,8 @@ The current code uses FHVAE to cluster EEG signals. We have prepared the dataset
 * To download the SparrKULee dataset, follow the instructions here : https://rdr.kuleuven.be/dataset.xhtml?persistentId=doi:10.48804/K3VSND
 * To download the KUL dataset, follow the instructions here : https://zenodo.org/records/4004271
 
-Store the KUL dataset at `ROOT_DIR/KUL_eeg/...`\n
+Store the KUL dataset at `ROOT_DIR/KUL_eeg/...`
+
 Store the SparrKULee dataset at `ROOT_DIR/SparrKULee/...`
 
 To run training, 
